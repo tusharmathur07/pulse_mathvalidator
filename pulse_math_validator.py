@@ -1080,12 +1080,39 @@ def m03_gst_reserve_gap(taxable_revenue, gst_rate, itc_expenses,
 # [FIX-M04] Z-score caller should use s_floor = 1.0 pp; COGS lag smoothing.
 # ----------------------------------------------------------------------------
 def m04_gross_margin(revenue, cogs, business_type=""):
-    """Returns gross_margin_pct."""
+    """Returns gross_margin_pct, or None if a DATA_QUALITY_FLAG is raised.
+    Guards (checked before any division):
+      revenue ≤ 0          → DATA_QUALITY_FLAG
+      cogs == 0            → DATA_QUALITY_FLAG (0% COGS / 100% margin implied)
+      cogs ≥ revenue       → DATA_QUALITY_FLAG (≥ 100% COGS)
+      cogs / revenue < 5%  → DATA_QUALITY_FLAG (confirm categorisation)
+    """
     _hdr("M-04 · Gross Margin %  [FIX-M04: z-score callers use s_floor=1.0 pp]")
+    _step("revenue", "QB TotalRevenue",    f"${revenue:,.2f}")
+    _step("COGS",    "QB CostOfGoodsSold", f"${cogs:,.2f}")
+
+    # ── Data-quality guards ────────────────────────────────────────────────
+    if revenue <= 0:
+        print(f"  🚫 [M-04] DATA_QUALITY_FLAG — revenue={revenue:,.2f} is zero/negative.  "
+              f"Cannot compute margin.  Check pipeline source.")
+        return None
+    if cogs == 0:
+        print(f"  🚫 [M-04] DATA_QUALITY_FLAG — COGS=0 implies 100% gross margin.  "
+              f"Verify expense categorisation is complete before alerting.")
+        return None
+    cogs_pct = cogs / revenue
+    if cogs_pct >= 1.0:
+        print(f"  🚫 [M-04] DATA_QUALITY_FLAG — COGS {cogs_pct * 100:.1f}% ≥ 100% of revenue.  "
+              f"Check for duplicate line items or data mapping error.")
+        return None
+    if cogs_pct < 0.05:
+        print(f"  🚫 [M-04] DATA_QUALITY_FLAG — COGS {cogs_pct * 100:.2f}% < 5% of revenue.  "
+              f"Confirm expense categorisation — do not treat as a real margin signal.")
+        return None
+    # ──────────────────────────────────────────────────────────────────────
+
     gross_profit     = revenue - cogs
     gross_margin_pct = gross_profit / revenue * 100
-    _step("revenue",          "QB TotalRevenue",          f"${revenue:,.2f}")
-    _step("COGS",             "QB CostOfGoodsSold",       f"${cogs:,.2f}")
     _step("gross_profit",     "revenue − COGS",           f"${gross_profit:,.2f}")
     _step("gross_margin_pct", "gross_profit/revenue×100", f"{gross_margin_pct:.4f}%")
 
@@ -1115,12 +1142,33 @@ def m04_gross_margin(revenue, cogs, business_type=""):
 S_FLOOR_FOOD_COST = 0.50   # [FIX-M05] minimum stdev in percentage points
 
 def m05_food_cost(food_cogs, food_revenue, history_12wk):
-    """Returns (food_cost_pct, z_food, mu, sigma_eff)."""
+    """Returns (food_cost_pct, z_food, mu, sigma_eff), or (None)*4 if DATA_QUALITY_FLAG.
+    Guards (checked before any division):
+      food_revenue ≤ 0       → DATA_QUALITY_FLAG
+      food_cogs == 0         → DATA_QUALITY_FLAG (0% food cost implied)
+      food_cogs ≥ food_revenue → DATA_QUALITY_FLAG (≥ 100% food cost)
+    """
     _hdr("M-05 · Food Cost %  [FIX-M05: s_floor=0.5 pp; z>4 → VERIFY DATA]")
+    _step("food_COGS",    "Toast / QB",               f"${food_cogs:,.2f}")
+    _step("food_revenue", "Square/Toast daily sales", f"${food_revenue:,.2f}")
+
+    # ── Data-quality guards ────────────────────────────────────────────────
+    if food_revenue <= 0:
+        print(f"  🚫 [M-05] DATA_QUALITY_FLAG — food_revenue={food_revenue:,.2f} is "
+              f"zero/negative.  Cannot compute food cost %.  Check POS data.")
+        return None, None, None, None
+    if food_cogs == 0:
+        print(f"  🚫 [M-05] DATA_QUALITY_FLAG — food_COGS=0 implies 0% food cost.  "
+              f"Verify all food purchases are categorised before alerting.")
+        return None, None, None, None
+    if food_cogs >= food_revenue:
+        print(f"  🚫 [M-05] DATA_QUALITY_FLAG — food_COGS ({food_cogs:,.2f}) ≥ "
+              f"food_revenue ({food_revenue:,.2f}).  "
+              f"Check for duplicate entries or data mapping error.")
+        return None, None, None, None
+    # ──────────────────────────────────────────────────────────────────────
 
     food_cost_pct = food_cogs / food_revenue * 100
-    _step("food_COGS",      "Toast / QB",               f"${food_cogs:,.2f}")
-    _step("food_revenue",   "Square/Toast daily sales", f"${food_revenue:,.2f}")
     _step("food_cost_pct",  "COGS/revenue × 100",       f"{food_cost_pct:.4f}%")
 
     mu         = _mean(history_12wk)
@@ -1169,6 +1217,14 @@ def m06_labor_cost(payroll_expense, revenue,
                    business_type=""):
     """Returns (labor_pct, z_labor, z_revenue, compound_signal_this_week)."""
     _hdr("M-06 · Labor Cost %  [FIX-M06: s_floor; compound requires 2 wks]")
+
+    # Data-quality guard — zero/negative revenue denominator
+    if revenue <= 0:
+        _step("payroll_expense", "ADP/Gusto actual run", f"${payroll_expense:,.2f}")
+        _step("revenue",         "QB / POS",             f"${revenue:,.2f}")
+        print(f"  🚫 [M-06] DATA_QUALITY_FLAG — revenue={revenue:,.2f} is zero/negative.  "
+              f"Cannot compute labor %.  Check POS/QB data.")
+        return None, None, None, None
 
     labor_pct = payroll_expense / revenue * 100
     _step("payroll_expense",  "ADP/Gusto actual run", f"${payroll_expense:,.2f}")
@@ -1229,6 +1285,14 @@ def m07_dso(ar_balance, revenue_90d, dso_history_12wk,
     z-score alert is suppressed; DSO value is still reported for reference.
     """
     _hdr("M-07 · Receivables DSO  [FIX-M07: use avg AR; ceiling=terms+buffer]")
+
+    # Data-quality guard — zero/negative revenue_90d denominator
+    if revenue_90d <= 0:
+        _step("AR_balance",      "open invoices (QB)",   f"${ar_balance:,.2f}")
+        _step("revenue_last_90d","QB P&L trailing 90d",  f"${revenue_90d:,.2f}")
+        print(f"  🚫 [M-07] DATA_QUALITY_FLAG — revenue_90d={revenue_90d:,.2f} is "
+              f"zero/negative.  Cannot compute DSO.  Check QB P&L data.")
+        return None, None, None, None
 
     avg_daily_sales = revenue_90d / 90
     dso = ar_balance / avg_daily_sales
@@ -2156,6 +2220,125 @@ def test_thin_history():
 
 
 # ---------------------------------------------------------------------------
+# DIRTY-DATA FLAG ASSERTIONS
+# ---------------------------------------------------------------------------
+def test_dirty_data():
+    """
+    Seven assertions proving that structurally-bad inputs raise
+    DATA_QUALITY_FLAG and never produce a financial alert.
+    Covers: zero COGS, COGS ≥ 100% revenue, zero revenue, COGS < 5%.
+    """
+
+    def _cap(fn, *args, **kwargs):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            result = fn(*args, **kwargs)
+        return result, buf.getvalue()
+
+    def _no_alert(out):
+        """True when no financial-alert phrase appears in captured output."""
+        alert_phrases = ("abs floor breach", "abs ceiling breach",
+                         "⚠️  ALERT", "⚠️  [M-")
+        return not any(p in out for p in alert_phrases)
+
+    print("\n" + "═" * 72)
+    print("  DIRTY-DATA FLAG ASSERTIONS")
+    print("  Proves: structurally-bad COGS/revenue → DATA_QUALITY_FLAG, "
+          "not a financial alert")
+    print("═" * 72)
+
+    REV = 50_000.0   # shared reference revenue
+
+    # ── DQ-01  M-04: COGS = 0 (zero COGS) ────────────────────────────────
+    print("\n  ── DQ-01  M-04  COGS=0 (zero COGS → 100% margin implied)")
+    gm_01, out_01 = _cap(m04_gross_margin, REV, 0.0)
+    for ln in out_01.splitlines():
+        print("  " + ln)
+    _check("DQ-01  M-04 COGS=0 → returns None",
+           float(gm_01 is None), 1.0, tol=0.0)
+    _check("DQ-01  M-04 COGS=0 → output contains DATA_QUALITY_FLAG",
+           float("DATA_QUALITY_FLAG" in out_01), 1.0, tol=0.0)
+    _check("DQ-01  M-04 COGS=0 → no financial alert fires",
+           float(_no_alert(out_01)), 1.0, tol=0.0)
+
+    # ── DQ-02  M-04: COGS > 100% of revenue ──────────────────────────────
+    print("\n  ── DQ-02  M-04  COGS=60,000 on revenue=50,000 (COGS 120% ≥ 100%)")
+    gm_02, out_02 = _cap(m04_gross_margin, REV, 60_000.0)
+    for ln in out_02.splitlines():
+        print("  " + ln)
+    _check("DQ-02  M-04 COGS≥revenue → returns None",
+           float(gm_02 is None), 1.0, tol=0.0)
+    _check("DQ-02  M-04 COGS≥revenue → output contains DATA_QUALITY_FLAG",
+           float("DATA_QUALITY_FLAG" in out_02), 1.0, tol=0.0)
+    _check("DQ-02  M-04 COGS≥revenue → no financial alert fires",
+           float(_no_alert(out_02)), 1.0, tol=0.0)
+
+    # ── DQ-03  M-04: zero revenue ─────────────────────────────────────────
+    print("\n  ── DQ-03  M-04  revenue=0 (zero revenue denominator)")
+    gm_03, out_03 = _cap(m04_gross_margin, 0.0, 10_000.0)
+    for ln in out_03.splitlines():
+        print("  " + ln)
+    _check("DQ-03  M-04 revenue=0 → returns None",
+           float(gm_03 is None), 1.0, tol=0.0)
+    _check("DQ-03  M-04 revenue=0 → output contains DATA_QUALITY_FLAG",
+           float("DATA_QUALITY_FLAG" in out_03), 1.0, tol=0.0)
+    _check("DQ-03  M-04 revenue=0 → no financial alert fires",
+           float(_no_alert(out_03)), 1.0, tol=0.0)
+
+    # ── DQ-04  M-04: COGS < 5% of revenue (confirm categorisation) ───────
+    print("\n  ── DQ-04  M-04  COGS=1,000 on revenue=50,000 (COGS 2% < 5%)")
+    gm_04, out_04 = _cap(m04_gross_margin, REV, 1_000.0)
+    for ln in out_04.splitlines():
+        print("  " + ln)
+    _check("DQ-04  M-04 COGS<5% → returns None",
+           float(gm_04 is None), 1.0, tol=0.0)
+    _check("DQ-04  M-04 COGS<5% → output contains DATA_QUALITY_FLAG",
+           float("DATA_QUALITY_FLAG" in out_04), 1.0, tol=0.0)
+    _check("DQ-04  M-04 COGS<5% → no financial alert fires",
+           float(_no_alert(out_04)), 1.0, tol=0.0)
+
+    # ── DQ-05  M-05: zero food_cogs ───────────────────────────────────────
+    print("\n  ── DQ-05  M-05  food_COGS=0 (zero food cost implied)")
+    fc_05, out_05 = _cap(m05_food_cost, 0.0, REV, [30.0] * 12)
+    fcp_05, *_ = fc_05
+    for ln in out_05.splitlines():
+        print("  " + ln)
+    _check("DQ-05  M-05 food_COGS=0 → food_cost_pct is None",
+           float(fcp_05 is None), 1.0, tol=0.0)
+    _check("DQ-05  M-05 food_COGS=0 → output contains DATA_QUALITY_FLAG",
+           float("DATA_QUALITY_FLAG" in out_05), 1.0, tol=0.0)
+    _check("DQ-05  M-05 food_COGS=0 → no financial alert fires",
+           float(_no_alert(out_05)), 1.0, tol=0.0)
+
+    # ── DQ-06  M-05: food_cogs ≥ food_revenue ────────────────────────────
+    print("\n  ── DQ-06  M-05  food_COGS=60,000 on food_revenue=50,000 (COGS ≥ rev)")
+    fc_06, out_06 = _cap(m05_food_cost, 60_000.0, REV, [30.0] * 12)
+    fcp_06, *_ = fc_06
+    for ln in out_06.splitlines():
+        print("  " + ln)
+    _check("DQ-06  M-05 COGS≥revenue → food_cost_pct is None",
+           float(fcp_06 is None), 1.0, tol=0.0)
+    _check("DQ-06  M-05 COGS≥revenue → output contains DATA_QUALITY_FLAG",
+           float("DATA_QUALITY_FLAG" in out_06), 1.0, tol=0.0)
+    _check("DQ-06  M-05 COGS≥revenue → no financial alert fires",
+           float(_no_alert(out_06)), 1.0, tol=0.0)
+
+    # ── DQ-07  M-06: zero revenue denominator ────────────────────────────
+    print("\n  ── DQ-07  M-06  revenue=0 (proves 'any metric' zero-revenue guard)")
+    lh = [35.0] * 12;  rh = [50_000.0] * 12
+    m6_07, out_07 = _cap(m06_labor_cost, 10_000.0, 0.0, lh, rh)
+    lp_07, *_ = m6_07
+    for ln in out_07.splitlines():
+        print("  " + ln)
+    _check("DQ-07  M-06 revenue=0 → labor_pct is None",
+           float(lp_07 is None), 1.0, tol=0.0)
+    _check("DQ-07  M-06 revenue=0 → output contains DATA_QUALITY_FLAG",
+           float("DATA_QUALITY_FLAG" in out_07), 1.0, tol=0.0)
+    _check("DQ-07  M-06 revenue=0 → no financial alert fires",
+           float(_no_alert(out_07)), 1.0, tol=0.0)
+
+
+# ---------------------------------------------------------------------------
 # VERTICAL ROUTING ASSERTIONS
 # ---------------------------------------------------------------------------
 def test_vertical_routing():
@@ -2430,6 +2613,7 @@ def main():
     test_amir()
     test_new_features()
     test_thin_history()
+    test_dirty_data()
     test_vertical_routing()
     _print_vertical_config()
     demo_remaining_metrics()
