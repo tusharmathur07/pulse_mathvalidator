@@ -40,6 +40,8 @@ DEVIATION NOTE lines flag where [FIX-M13] changes the result vs the case doc.
 ================================================================================
 """
 
+import io
+import contextlib
 import math
 import random
 
@@ -2032,6 +2034,124 @@ def test_new_features():
 
 
 # ---------------------------------------------------------------------------
+# VERTICAL ROUTING ASSERTIONS
+# ---------------------------------------------------------------------------
+def test_vertical_routing():
+    """
+    Six assertions — three pairs — proving that VERTICAL_CONFIG changes
+    alert behaviour for identical numeric inputs based on business_type.
+    """
+
+    def _cap(fn, *args, **kwargs):
+        """Call fn, capture its stdout, return (return_value, captured_str)."""
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            result = fn(*args, **kwargs)
+        return result, buf.getvalue()
+
+    def sym_hist(mu, sigma, n=12):
+        """12-point symmetric history: sample mean=mu, sample stdev=sigma."""
+        spread = sigma * math.sqrt((n - 1) / n)
+        lo, hi = mu - spread, mu + spread
+        return [lo] * (n // 2) + [hi] * (n // 2)
+
+    print("\n" + "═" * 72)
+    print("  VERTICAL ROUTING ASSERTIONS — same number, different vertical")
+    print("═" * 72)
+
+    # ── VR-01  M-07  DSO = 50 days ───────────────────────────────────────
+    # restaurant  abs_ceiling = 14d  →  50 > 14 → FIRES
+    # contractor  abs_ceiling = 70d  →  50 < 70 → SILENT
+    print("\n  ── VR-01  M-07  DSO = 50d")
+    print("           restaurant ceil=14d  →  expect FIRES")
+    print("           contractor  ceil=70d  →  expect SILENT")
+    print()
+    ar, rev90 = 50_000.0, 90_000.0   # avg_daily = 1_000 → DSO = 50
+
+    _, out_m07_resto = _cap(m07_dso, ar, rev90,
+                            sym_hist(8.0,  1.0),   # restaurant normal DSO ~8d
+                            stated_payment_terms=30,
+                            business_type="restaurant")
+    _, out_m07_contr = _cap(m07_dso, ar, rev90,
+                            sym_hist(55.0, 5.0),   # contractor normal DSO ~55d
+                            stated_payment_terms=30,
+                            business_type="contractor")
+
+    print("  restaurant output:")
+    for ln in out_m07_resto.splitlines():
+        print("  " + ln)
+    print()
+    print("  contractor output:")
+    for ln in out_m07_contr.splitlines():
+        print("  " + ln)
+
+    _check("VR-01  restaurant  DSO=50d > ceil 14d → abs ceiling FIRES",
+           float("[M-07 DSO] abs ceiling breach" in out_m07_resto), 1.0, tol=0.0)
+    _check("VR-01  contractor  DSO=50d < ceil 70d → abs ceiling SILENT",
+           float("[M-07 DSO] abs ceiling breach" not in out_m07_contr), 1.0, tol=0.0)
+
+    # ── VR-02  M-06  labor = 42 % ────────────────────────────────────────
+    # restaurant  abs_ceiling = 38%  →  42 > 38 → FIRES
+    # agency      z_score_only=True  →  no abs test → SILENT
+    print("\n  ── VR-02  M-06  labor = 42%")
+    print("           restaurant ceil=38%      →  expect FIRES")
+    print("           agency     z-score only  →  expect SILENT")
+    print()
+    rev   = 100_000.0
+    labor =  42_000.0   # 42 %
+    lh    = sym_hist(42.0, 1.0)
+    rh    = sym_hist(rev,  500.0)
+
+    _, out_m06_resto = _cap(m06_labor_cost, labor, rev, lh, rh,
+                            business_type="restaurant")
+    _, out_m06_agncy = _cap(m06_labor_cost, labor, rev, lh, rh,
+                            business_type="agency")
+
+    print("  restaurant output:")
+    for ln in out_m06_resto.splitlines():
+        print("  " + ln)
+    print()
+    print("  agency output:")
+    for ln in out_m06_agncy.splitlines():
+        print("  " + ln)
+
+    _check("VR-02  restaurant  labor=42% > ceil 38% → abs ceiling FIRES",
+           float("[M-06] abs ceiling breach" in out_m06_resto), 1.0, tol=0.0)
+    _check("VR-02  agency      labor=42%: z-score only → abs ceiling SILENT",
+           float("[M-06] abs ceiling breach" not in out_m06_agncy), 1.0, tol=0.0)
+    _check("VR-02  agency      prints z-score-only notice",
+           float("z-score only" in out_m06_agncy), 1.0, tol=0.0)
+
+    # ── VR-03  M-04  gross margin = 58 % ─────────────────────────────────
+    # restaurant  floor = 55%  →  58 > 55 → SILENT  (above floor, fine)
+    # saas        floor = 65%  →  58 < 65 → FIRES
+    print("\n  ── VR-03  M-04  gross margin = 58%")
+    print("           restaurant floor=55%  →  expect SILENT (58% is above floor)")
+    print("           saas        floor=65%  →  expect FIRES  (58% is below floor)")
+    print()
+    revenue = 100_000.0
+    cogs    =  42_000.0   # margin = 58 %
+
+    _, out_m04_resto = _cap(m04_gross_margin, revenue, cogs,
+                            business_type="restaurant")
+    _, out_m04_saas  = _cap(m04_gross_margin, revenue, cogs,
+                            business_type="saas")
+
+    print("  restaurant output:")
+    for ln in out_m04_resto.splitlines():
+        print("  " + ln)
+    print()
+    print("  saas output:")
+    for ln in out_m04_saas.splitlines():
+        print("  " + ln)
+
+    _check("VR-03  restaurant  margin=58% > floor 55% → floor SILENT",
+           float("[M-04] abs floor breach" not in out_m04_resto), 1.0, tol=0.0)
+    _check("VR-03  saas        margin=58% < floor 65% → floor FIRES",
+           float("[M-04] abs floor breach" in out_m04_saas), 1.0, tol=0.0)
+
+
+# ---------------------------------------------------------------------------
 # VERTICAL CONFIG PRINTER
 # ---------------------------------------------------------------------------
 def _print_vertical_config():
@@ -2187,6 +2307,7 @@ def main():
     test_sarah()
     test_amir()
     test_new_features()
+    test_vertical_routing()
     _print_vertical_config()
     demo_remaining_metrics()
 
