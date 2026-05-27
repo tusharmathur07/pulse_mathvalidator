@@ -41,6 +41,7 @@ DEVIATION NOTE lines flag where [FIX-M13] changes the result vs the case doc.
 """
 
 import math
+import random
 
 # ============================================================================
 # SECTION 1 — INPUT DATA
@@ -168,6 +169,39 @@ AMIR = {
     "m15_data_quality_score":   80.0,
 }
 
+# ---------------------------------------------------------------------------
+# MARIA_TRANSACTIONS — representative normalized transaction rows
+# Source: 02_NORMALIZED_DB_ROWS.md (sign convention: negative = debit/outflow)
+# Recurring vendors appear ≥ 3 times so the unmodelled-outflow scan ignores
+# them.  The two irregular large debits at the bottom are what the scan flags.
+# ---------------------------------------------------------------------------
+MARIA_TRANSACTIONS = [
+    # Recurring payroll (3 runs in history → recognised as recurring)
+    {"merchant_name": "ADP PAYROLL",             "amount": -15320.24, "date": "2026-02-28", "is_pending": False},
+    {"merchant_name": "ADP PAYROLL",             "amount": -14890.00, "date": "2026-02-14", "is_pending": False},
+    {"merchant_name": "ADP PAYROLL",             "amount": -15100.00, "date": "2026-01-31", "is_pending": False},
+    # Recurring produce supplier (3 orders)
+    {"merchant_name": "METRO PRODUCE SUPPLY",    "amount": -14200.00, "date": "2026-02-26", "is_pending": False},
+    {"merchant_name": "METRO PRODUCE SUPPLY",    "amount": -13800.00, "date": "2026-02-12", "is_pending": False},
+    {"merchant_name": "METRO PRODUCE SUPPLY",    "amount": -14500.00, "date": "2026-01-29", "is_pending": False},
+    # Recurring utility (3 bills)
+    {"merchant_name": "BC Hydro",                "amount":   -420.00, "date": "2026-02-20", "is_pending": False},
+    {"merchant_name": "BC Hydro",                "amount":   -415.00, "date": "2026-01-20", "is_pending": False},
+    {"merchant_name": "BC Hydro",                "amount":   -430.00, "date": "2025-12-20", "is_pending": False},
+    # Revenue credit — ignored by debit scan
+    {"merchant_name": "SQUARE INC",              "amount":  +4900.00, "date": "2026-02-24", "is_pending": False},
+    # Small food supplier (amount < $1,000 threshold → not flagged)
+    {"merchant_name": "SYSCO CANADA 4821",       "amount":    -89.00, "date": "2026-02-19", "is_pending": False},
+    # Pending — excluded from the scan
+    {"merchant_name": "RICExPRESS WHOLESALE",    "amount":   -312.50, "date": "2026-02-28", "is_pending": True},
+    # ── Irregular large debits the forecast is NOT capturing ──────────────
+    # Annual commercial insurance (appears once per year)
+    {"merchant_name": "PACIFIC INSURANCE GROUP", "amount":  -3200.00, "date": "2026-01-15", "is_pending": False},
+    # Quarterly kitchen-equipment maintenance (appears ~4×/year, but only
+    # once in this 90-day window — flagged as irregular by the scan)
+    {"merchant_name": "KITCHENTECH REPAIRS",     "amount":  -1800.00, "date": "2025-11-20", "is_pending": False},
+]
+
 
 # ============================================================================
 # SECTION 2 — UTILITY FUNCTIONS
@@ -223,6 +257,152 @@ def _z_score(current_value, history, s_floor=0.0):
 
 # Corrected alert threshold for n=12 (t-distribution, 11 df, one-sided 2.28%)
 T_THRESHOLD_N12 = 2.255   # [FIX-Z0] replaces flat 2.0
+
+# ---------------------------------------------------------------------------
+# [CHANGE 3] Cross-cutting extreme-reading router
+# ---------------------------------------------------------------------------
+EXTREME_Z_THRESHOLD = 4.0  # |z| beyond this → VERIFY DATA, not a crisis alert
+
+
+def _route_z_signal(z, metric_name, direction="high", threshold=None):
+    """
+    [CHANGE 3] Shared extreme-reading router applied to every z-score metric.
+
+    |z| > EXTREME_Z_THRESHOLD  →  returns 'VERIFY_DATA'
+        A reading this extreme is statistically near-impossible under the
+        model's own assumptions.  It is more likely a data-quality issue
+        (miscategorised transaction, double-count, POS remap) than a genuine
+        financial crisis.  Do NOT fire a financial alert; flag for review.
+
+    z beyond t-threshold (directional)  →  returns 'ALERT'
+    otherwise                            →  returns 'OK'
+
+    Parameters
+    ----------
+    z         : float   — the z-score to evaluate
+    metric_name: str    — shown in the printed line (e.g. 'M-07 DSO')
+    direction : str     — 'high'  alert when z >  threshold
+                          'low'   alert when z < −threshold
+                          'both'  alert on either side
+    threshold : float   — override; if None uses T_THRESHOLD_N12
+
+    M-05 retains its own inline check (already had this logic).
+    Applied to M-06, M-07, M-09, M-10 by this change.  [CHANGE 3]
+    """
+    t = threshold if threshold is not None else T_THRESHOLD_N12
+    if abs(z) > EXTREME_Z_THRESHOLD:
+        print(f"  ⚠️  [{metric_name}] |z|={abs(z):.2f} > {EXTREME_Z_THRESHOLD} "
+              f"→ VERIFY DATA  (extreme reading — check data quality first)")
+        return "VERIFY_DATA"
+    if direction in ("high", "both") and z > t:
+        print(f"  ⚠️  [{metric_name}] ALERT — z={z:.2f} > {t}")
+        return "ALERT"
+    if direction in ("low", "both") and z < -t:
+        print(f"  ⚠️  [{metric_name}] ALERT — z={z:.2f} < −{t}")
+        return "ALERT"
+    print(f"  ✅ [{metric_name}] No alert — z={z:.2f}")
+    return "OK"
+
+
+# ---------------------------------------------------------------------------
+# [CHANGE 2] Cross-metric alert-budget / ranking layer
+# ---------------------------------------------------------------------------
+
+def _portfolio_z_cutoff(n_tests):
+    """
+    [CHANGE 2] Per-test z cutoff to hold a ≤5% family-wise false-alarm rate
+    across n simultaneous independent tests (Bonferroni approximation).
+
+    As the portfolio grows, each signal must clear a higher bar before it
+    reaches the owner — the main structural defence against alert fatigue.
+    The per-vendor Bonferroni values in M-09 (7→2.45, 20→2.81, 40→3.02)
+    are the vendor-level expression of exactly this principle; this function
+    applies it across ALL metrics in a single run.
+    """
+    if n_tests <= 1:   return T_THRESHOLD_N12  # single test: honour existing threshold
+    if n_tests <= 3:   return 2.394            # 0.05 / 3  → z ≈ 2.39
+    if n_tests <= 5:   return 2.576            # 0.05 / 5  → z ≈ 2.58
+    if n_tests <= 7:   return 2.697            # 0.05 / 7  → z ≈ 2.70
+    if n_tests <= 10:  return 2.807            # 0.05 / 10 → z ≈ 2.81
+    if n_tests <= 15:  return 2.935            # 0.05 / 15 → z ≈ 2.94
+    if n_tests <= 20:  return 3.023            # 0.05 / 20 → z ≈ 3.02 (matches M-09 ref)
+    if n_tests <= 40:  return 3.200            # 0.05 / 40 → z ≈ 3.20
+    return 3.400
+
+
+def rank_and_cap_alerts(signals, cap=5):
+    """
+    [CHANGE 2] Portfolio-level false-discovery control.
+
+    Collects every firing signal from every metric (and every vendor for
+    M-09) in a single run, ranks by severity, applies a portfolio-wide
+    cutoff that tightens as the portfolio grows, and returns at most `cap`
+    signals — so only the genuinely unusual few reach the owner.
+
+    Parameters
+    ----------
+    signals : list of (metric_name, severity, route, message)
+        metric_name  str   — e.g. 'M-07 DSO'
+        severity     float — |z| or a manual priority score (higher = more urgent)
+        route        str   — 'ALERT', 'VERIFY_DATA', or 'WARNING'
+        message      str   — short description for the ranked output table
+    cap : int
+        Hard ceiling on items returned per run (default 5).
+
+    Returns
+    -------
+    list of (metric_name, severity, route, message) — top ≤cap signals,
+    sorted by severity descending.
+
+    Filtering rules
+    ---------------
+    • 'VERIFY_DATA' signals always pass the cutoff — they flag possible
+      data problems that must be reviewed regardless of z magnitude.
+    • 'ALERT' and 'WARNING' signals must reach severity ≥ portfolio cutoff
+      for n = len(signals) to survive the filter.
+    • After filtering, all remaining signals are sorted by severity and
+      capped at `cap`; signals below the cap line are reported as suppressed.
+    """
+    _hdr("ALERT BUDGET — Portfolio Ranking Layer  [CHANGE 2]")
+
+    n      = len(signals)
+    cutoff = _portfolio_z_cutoff(n)
+
+    print(f"\n  Signals submitted       : {n}")
+    print(f"  Portfolio z-cutoff      : {cutoff:.3f}  "
+          f"(Bonferroni for {n} tests, 5% family-wise rate)")
+    print(f"  Alert cap per run       : {cap}")
+
+    filtered = []
+    for metric, severity, route, message in signals:
+        if route == "VERIFY_DATA" or severity >= cutoff:
+            filtered.append((metric, severity, route, message))
+
+    ranked = sorted(filtered, key=lambda x: x[1], reverse=True)
+    capped = ranked[:cap]
+
+    n_by_cutoff = n - len(filtered)
+    n_by_cap    = max(0, len(ranked) - cap)
+
+    print(f"\n  Suppressed by cutoff    : {n_by_cutoff}  "
+          f"(severity < {cutoff:.3f})")
+    print(f"  Suppressed by cap       : {n_by_cap}")
+    print(f"  Returned                : {len(capped)}")
+
+    if capped:
+        print(f"\n  {'#':<4} {'Metric':<22} {'Severity':>9} {'Route':<14} Message")
+        print(f"  {'─'*4} {'─'*22} {'─'*9} {'─'*14} {'─'*38}")
+        for i, (m, sev, route, msg) in enumerate(capped, 1):
+            print(f"  {i:<4} {m:<22} {sev:>9.3f} {route:<14} {msg[:50]}")
+    else:
+        print(f"\n  ✅ No signals above portfolio threshold this run.")
+
+    if n_by_cap > 0:
+        print(f"\n  [{n_by_cap} signal(s) above cutoff but suppressed by cap — "
+              f"raise cap to surface them]")
+
+    return capped
+
 
 # ---------------------------------------------------------------------------
 # [FIX-M03] ITC eligibility factors by expense category
@@ -349,6 +529,221 @@ def m01_cash_gap(current_balance, daily_inflows, daily_outflows,
         print("\n  No cash gap detected in 90-day window.")
 
     return gap_day, gap_balance, gap_amount, cash_threshold, balances
+
+
+# ----------------------------------------------------------------------------
+# M-01-MC  helpers  [CHANGE 1]
+# ----------------------------------------------------------------------------
+
+def _run_one_cash_flow(current_balance, inflows, outflows, threshold, days):
+    """
+    [CHANGE 1] Single pass of the daily recurrence used by each MC iteration.
+    Returns (gap_day, gap_amount) if the balance ever falls below threshold,
+    (None, None) if it never does.  gap_day is 1-indexed.
+    """
+    balance = current_balance
+    for d in range(days):
+        balance = balance + inflows[d] - outflows[d]
+        if balance < threshold:
+            return d + 1, threshold - balance
+    return None, None
+
+
+def _unmodelled_outflow_scan(transactions, large_abs_threshold=1_000.0):
+    """
+    [CHANGE 1] Search transaction history for irregular large debits that
+    are NOT captured by the recurring outflow schedule.
+
+    'Irregular' = the merchant appears fewer than 3 times in the history.
+    'Large'     = |amount| > large_abs_threshold (default $1,000).
+    Pending transactions are excluded (they have not posted yet).
+
+    Returns a list of dicts: {merchant, amount, date, note}.
+    These are the outflows the 90-day forecast is silently ignoring.
+    """
+    from collections import Counter
+
+    debits = [
+        (t["merchant_name"], abs(t["amount"]), t.get("date", ""))
+        for t in transactions
+        if t.get("amount", 0) < 0 and not t.get("is_pending", False)
+    ]
+
+    merchant_counts = Counter(m for m, _, _ in debits)
+
+    seen       = set()
+    unmodelled = []
+    for merchant, amount, date in debits:
+        if merchant in seen:
+            continue
+        if merchant_counts[merchant] < 3 and amount > large_abs_threshold:
+            seen.add(merchant)
+            unmodelled.append({
+                "merchant": merchant,
+                "amount":   amount,
+                "date":     date,
+                "note":     (f"appears {merchant_counts[merchant]}× in history — "
+                             f"not captured in recurring forecast"),
+            })
+    return unmodelled
+
+
+def m01_cash_gap_mc(current_balance, daily_inflows_base, daily_outflows_base,
+                    avg_weekly_fixed, threshold_floor=3_000.0, days=90,
+                    revenue_noise_pct=0.15, cost_noise_pct=0.10,
+                    invoice_clients=None, transaction_history=None,
+                    n_runs=1_000, seed=42):
+    """
+    [CHANGE 1] Probabilistic M-01: wraps the deterministic daily recurrence
+    in 1,000 Monte Carlo iterations.
+
+    Each run perturbs three uncertain inputs:
+
+    Revenue noise
+        The base daily revenue (minimum value in daily_inflows_base) is
+        scaled by N(1, (rev_noise/2)²), floored at 0.50.
+        Scheduled transfers — Square payout and any other fixed-day inflows
+        above the daily base — are left unchanged; they are contractually
+        determined, not revenue estimates.
+
+    Cost noise
+        The base daily fixed cost (minimum value in daily_outflows_base) is
+        scaled by N(1, (cost_noise/2)²), floored at 0.50.
+        Large scheduled outflows — payroll, produce bill — are unchanged;
+        their amounts are known in advance.
+
+    Invoice timing  (optional)
+        If invoice_clients is provided, each invoice's payment day is sampled
+        from N(expected_day, stdev_days²) and clamped to [1, days].
+
+    The deterministic m01_cash_gap result is the median of this distribution.
+    All existing assertions continue to use m01_cash_gap unchanged.
+
+    Parameters
+    ----------
+    invoice_clients : list of dicts, each containing:
+        name         str   — client name (printed in summary)
+        amount       float — invoice face value
+        expected_day int   — central estimate of cash arrival (from Day 0)
+        stdev_days   float — uncertainty around expected_day
+    transaction_history : list of transaction dicts (e.g. MARIA_TRANSACTIONS).
+        If supplied, runs _unmodelled_outflow_scan on it.
+
+    Returns
+    -------
+    dict with keys:
+        prob_breach          float  — fraction of runs that breach threshold
+        p10/p50/p90_gap_day  int    — percentile breach days (None if too few)
+        p10/p50/p90_gap_amt  float  — percentile gap amounts
+        unmodelled_outflows  list   — from _unmodelled_outflow_scan
+        n_runs               int    — iterations executed
+    """
+    _hdr("M-01-MC · Probabilistic Cash Gap  [CHANGE 1: 1,000-run Monte Carlo]")
+
+    cash_threshold = max(threshold_floor, 0.50 * avg_weekly_fixed)
+
+    # Separate recurring base from scheduled extras.
+    # min() across all days picks the day with no large scheduled items.
+    base_daily_rev  = min(daily_inflows_base)
+    base_daily_cost = min(daily_outflows_base)
+
+    rng        = random.Random(seed)
+    gap_days   = []
+    gap_amts   = []
+
+    for _ in range(n_runs):
+        # Run-level noise multipliers (one per uncertain component)
+        rev_mult  = max(0.50, 1.0 + rng.gauss(0, revenue_noise_pct / 2))
+        cost_mult = max(0.50, 1.0 + rng.gauss(0, cost_noise_pct    / 2))
+
+        # Scale recurring component; preserve scheduled extras exactly
+        noisy_in  = [(base_daily_rev  * rev_mult  + (x - base_daily_rev))
+                     for x in daily_inflows_base]
+        noisy_out = [(base_daily_cost * cost_mult + (x - base_daily_cost))
+                     for x in daily_outflows_base]
+
+        # Stochastic invoice arrivals
+        if invoice_clients:
+            for client in invoice_clients:
+                exp     = client["expected_day"]
+                std     = client.get("stdev_days", 1.0)
+                amt     = client["amount"]
+                pay_day = int(round(rng.gauss(exp, std)))
+                pay_day = max(1, min(days, pay_day))
+                noisy_in[pay_day - 1] += amt
+
+        gap_day, gap_amt = _run_one_cash_flow(
+            current_balance, noisy_in, noisy_out, cash_threshold, days)
+
+        if gap_day is not None:
+            gap_days.append(gap_day)
+            gap_amts.append(gap_amt)
+
+    breach_count = len(gap_days)
+    prob_breach  = breach_count / n_runs
+
+    def _pct(lst, p):
+        if not lst:
+            return None
+        s   = sorted(lst)
+        idx = max(0, min(len(s) - 1, int(len(s) * p / 100)))
+        return s[idx]
+
+    result = {
+        "prob_breach":   prob_breach,
+        "p10_gap_day":   _pct(gap_days, 10),
+        "p50_gap_day":   _pct(gap_days, 50),
+        "p90_gap_day":   _pct(gap_days, 90),
+        "p10_gap_amt":   _pct(gap_amts, 10),
+        "p50_gap_amt":   _pct(gap_amts, 50),
+        "p90_gap_amt":   _pct(gap_amts, 90),
+        "unmodelled_outflows": [],
+        "n_runs":        n_runs,
+    }
+
+    # ── Print probabilistic summary ──────────────────────────────────────────
+    print(f"\n  Monte Carlo: {n_runs:,} runs · seed={seed}")
+    print(f"  Revenue noise ±{revenue_noise_pct*100:.0f}%  "
+          f"· Cost noise ±{cost_noise_pct*100:.0f}%")
+    if invoice_clients:
+        for c in invoice_clients:
+            print(f"  Invoice: {c.get('name','?')}  "
+                  f"expected Day {c['expected_day']} ±{c.get('stdev_days', 1):.1f}d  "
+                  f"${c['amount']:,.2f}")
+
+    print(f"\n  ┌── PROBABILISTIC RESULT ──────────────────────────────────────────┐")
+    print(f"  │  P(breach in {days}d)   = {prob_breach:.1%}  "
+          f"({breach_count:,} / {n_runs:,} runs)")
+    if result["p50_gap_day"] is not None:
+        print(f"  │  Gap day    P10–P90 : "
+              f"Day {result['p10_gap_day']} – Day {result['p90_gap_day']}  "
+              f"(median Day {result['p50_gap_day']})")
+        print(f"  │  Gap amount P10–P90 : "
+              f"${result['p10_gap_amt']:,.2f} – ${result['p90_gap_amt']:,.2f}  "
+              f"(median ${result['p50_gap_amt']:,.2f})")
+        print(f"  │")
+        print(f"  │  Deterministic (median run): "
+              f"Day {result['p50_gap_day']}  /  ${result['p50_gap_amt']:,.2f}")
+    else:
+        print(f"  │  No breach in median run.")
+    print(f"  └──────────────────────────────────────────────────────────────────┘")
+
+    # ── Unmodelled-outflow scan ───────────────────────────────────────────────
+    if transaction_history:
+        result["unmodelled_outflows"] = _unmodelled_outflow_scan(transaction_history)
+        _hdr("M-01-MC · Unmodelled-Outflow Scan  [CHANGE 1]")
+        umo = result["unmodelled_outflows"]
+        if umo:
+            print(f"\n  ⚠️  {len(umo)} irregular large debit(s) NOT captured by forecast:")
+            for u in umo:
+                print(f"     • {u['merchant']:<32} ${u['amount']:>8,.2f}  "
+                      f"({u['date']})  {u['note']}")
+            print(f"\n  These outflows will occur but are invisible to the 90-day model.")
+            print(f"  Add them as scheduled outflows to close the gap in coverage.")
+        else:
+            print(f"\n  ✅ No unmodelled large debits detected in transaction history.")
+
+    return result
 
 
 # ----------------------------------------------------------------------------
@@ -538,8 +933,7 @@ def m06_labor_cost(payroll_expense, revenue,
           f"{z_rev:.4f}")
 
     compound_this_week = z_labor > 1.5 and z_rev < -1.0
-    print(f"\n  Standard alert (z_labor > {T_THRESHOLD_N12}): "
-          f"{'YES ⚠️' if z_labor > T_THRESHOLD_N12 else 'No'}")
+    _route_z_signal(z_labor, "M-06 labor %", direction="high")   # [CHANGE 3]
     print(f"  Compound this week (z_L>1.5 & z_R<−1.0): "
           f"{'YES ⚠️' if compound_this_week else 'No'}")
     print(f"  [FIX-M06] Compound ESCALATES only after 2 consecutive weeks meeting condition.")
@@ -575,9 +969,9 @@ def m07_dso(ar_balance, revenue_90d, dso_history_12wk,
           f"({dso:.4f}−{mu_dso:.4f})/{sigma_dso:.4f}",
           f"{z_dso:.4f}")
 
-    alert = z_dso > T_THRESHOLD_N12 or dso > abs_ceiling
-    print(f"\n  Alert (z>{T_THRESHOLD_N12} or DSO>{abs_ceiling}d): "
-          f"{'ALERT ⚠️' if alert else 'No alert'}")
+    _route_z_signal(z_dso, "M-07 DSO", direction="high")          # [CHANGE 3]
+    if dso > abs_ceiling:                                          # absolute ceiling check kept
+        print(f"  ⚠️  [M-07 DSO] abs ceiling breach: {dso:.1f}d > {abs_ceiling}d")
     return dso, z_dso, mu_dso, sigma_dso
 
 
@@ -678,7 +1072,7 @@ def m09_vendor_anomaly(vendor_name, this_week_charge, history_12wk,
     _step("Bonferroni cutoff", f"z for {n_vendors_total} vendors [FIX-M09]",
           f"{cutoff}", f"vs flat 2.0 in original spec")
 
-    print(f"\n  Alert (z > {cutoff}): {'ALERT ⚠️' if z > cutoff else 'No alert'}")
+    _route_z_signal(z, "M-09 vendor", direction="high", threshold=cutoff)  # [CHANGE 3]
     return z, mu, sigma, cutoff
 
 
@@ -706,8 +1100,7 @@ def m10_revenue_trend(this_week_revenue, history_12wk, seasonal_index=1.0):
     _step("revenue_z",            "(actual − expected)/s", f"{z:.4f}")
     _step("deviation",            "",                     f"{deviation_pct:.1f}%")
 
-    print(f"\n  Alert (z < −{T_THRESHOLD_N12}): "
-          f"{'ALERT ⚠️' if z < -T_THRESHOLD_N12 else 'No alert'}")
+    _route_z_signal(z, "M-10 revenue", direction="low")           # [CHANGE 3]
     return z, seasonal_expected, mu, sigma
 
 
@@ -1262,6 +1655,100 @@ def test_amir():
 
 
 # ---------------------------------------------------------------------------
+# NEW ASSERTIONS — Change 2 (alert budget) · Change 3 (VERIFY DATA routing)
+# ---------------------------------------------------------------------------
+def test_new_features():
+    print("\n" + "═" * 72)
+    print("  NEW ASSERTIONS — Change 2 · Alert Budget  &  Change 3 · VERIFY DATA")
+    print("═" * 72)
+
+    # ── Change 3: _route_z_signal routing ────────────────────────────────────
+    # Three canonical cases for the cross-cutting extreme-reading router.
+    print("\n  ── Change 3 routing cases ──")
+    route_extreme = _route_z_signal(11.18, "M-07 test [extreme]", direction="high")
+    route_alert   = _route_z_signal( 2.50, "M-07 test [alert]",   direction="high")
+    route_ok      = _route_z_signal( 1.00, "M-07 test [ok]",      direction="high")
+
+    print("\n  ── Assertions ──")
+    _check("CHANGE 3  z=11.18 routes to VERIFY_DATA",
+           float(route_extreme == "VERIFY_DATA"), 1.0, tol=0.0)
+    _check("CHANGE 3  z=2.50  routes to ALERT",
+           float(route_alert   == "ALERT"),       1.0, tol=0.0)
+    _check("CHANGE 3  z=1.00  routes to OK",
+           float(route_ok      == "OK"),           1.0, tol=0.0)
+
+    # ── Change 2: rank_and_cap_alerts ────────────────────────────────────────
+    # 9 signals submitted.  _portfolio_z_cutoff(9) = 2.807.
+    # 4 signals are below the cutoff and get filtered; 5 survive.
+    # cap=4 then suppresses the 5th (M-09 vendor B, sev=3.50).
+    # VERIFY_DATA signals bypass the cutoff but are still subject to the cap.
+    print("\n  ── Change 2 alert budget (9 signals, cap=4) ──")
+    signals = [
+        ("M-08 client delay",  26.92, "ALERT",       "Coastal 31d overdue — abs_gap 27.8d"),
+        ("M-07 DSO",           11.18, "VERIFY_DATA",  "DSO z=11.18 — check AR snapshot"),
+        ("M-05 food cost",     16.27, "VERIFY_DATA",  "food cost z=16.27 — verify invoices"),
+        ("M-09 vendor A",      10.85, "VERIFY_DATA",  "vendor A z=10.85 — check POS remap"),
+        ("M-09 vendor B",       3.50, "ALERT",        "vendor B z=3.50 — above cutoff"),
+        ("M-10 revenue",        2.78, "ALERT",        "revenue z=−2.78 — below cutoff 2.807"),
+        ("M-06 labor",          1.91, "ALERT",        "labor z=1.91 — below cutoff 2.807"),
+        ("M-03 GST reserve",    2.50, "WARNING",      "GST gap $1,680 — below cutoff 2.807"),
+        ("M-02 payroll cov.",   0.95, "ALERT",        "coverage 0.95 < 1.0 — below cutoff"),
+    ]
+    capped = rank_and_cap_alerts(signals, cap=4)
+
+    print("\n  ── Assertions ──")
+    _check("CHANGE 2  cap=4 → returns exactly 4",
+           float(len(capped)), 4.0, tol=0.0)
+    _check("CHANGE 2  top signal is highest severity (M-08, z=26.92)",
+           capped[0][1], 26.92, tol=0.01)
+    _check("CHANGE 2  M-10 (z=2.78 < cutoff 2.807) not returned",
+           float(not any(s[0] == "M-10 revenue"   for s in capped)), 1.0, tol=0.0)
+    _check("CHANGE 2  M-06 (z=1.91 < cutoff 2.807) not returned",
+           float(not any(s[0] == "M-06 labor"     for s in capped)), 1.0, tol=0.0)
+    _check("CHANGE 2  M-09 vendor B (z=3.50, above cutoff) trimmed by cap",
+           float(not any(s[0] == "M-09 vendor B"  for s in capped)), 1.0, tol=0.0)
+
+    # ── Change 1: M-01 Monte Carlo ────────────────────────────────────────────
+    # Maria, 1,000 runs, no invoice clients.
+    # Because every noisy scenario still forces a payroll-day breach (the
+    # ±15% revenue / ±10% cost swings cannot offset a $15,320 payroll hit
+    # against a ~$14,610 pre-payroll balance), prob_breach ≈ 1.0 and
+    # gap_day = 16 in all runs.  The band asserts the deterministic result
+    # (Day 16, $3,736.24) sits inside the P10–P90 envelope.
+    print("\n  ── Change 1 M-01 Monte Carlo (Maria, 1,000 runs) ──")
+    m        = MARIA
+    inflows, outflows, _ = _build_maria_flow(m)
+    avg_wf   = m["daily_fixed_costs"] * 7
+
+    mc = m01_cash_gap_mc(
+        m["current_balance"], inflows, outflows,
+        avg_wf, m["cash_threshold_floor"],
+        revenue_noise_pct=0.15,
+        cost_noise_pct=0.10,
+        transaction_history=MARIA_TRANSACTIONS,
+        n_runs=1_000,
+        seed=42,
+    )
+
+    DET_GAP_DAY = 16
+    DET_GAP_AMT = 3_736.24   # threshold($3,000) − balance(−$736.24)
+
+    print("\n  ── Assertions ──")
+    _check("CHANGE 1  P(breach) ≥ 0.90  (Maria is in cash crisis)",
+           mc["prob_breach"], 1.0, tol=0.10)
+    _check("CHANGE 1  P10_gap_day ≤ deterministic day 16",
+           float((mc["p10_gap_day"] or 999) <= DET_GAP_DAY), 1.0, tol=0.0)
+    _check("CHANGE 1  P90_gap_day ≥ deterministic day 16",
+           float((mc["p90_gap_day"] or   0) >= DET_GAP_DAY), 1.0, tol=0.0)
+    _check("CHANGE 1  P10_gap_amt ≤ deterministic gap $3,736.24",
+           float((mc["p10_gap_amt"] or 999_999) <= DET_GAP_AMT), 1.0, tol=0.0)
+    _check("CHANGE 1  P90_gap_amt ≥ deterministic gap $3,736.24",
+           float((mc["p90_gap_amt"] or       0) >= DET_GAP_AMT), 1.0, tol=0.0)
+    _check("CHANGE 1  unmodelled outflows detected (≥ 1 irregular large debit)",
+           float(len(mc["unmodelled_outflows"]) >= 1), 1.0, tol=0.0)
+
+
+# ---------------------------------------------------------------------------
 # ADDITIONAL DEMOS  (M-04 · M-09 · M-10 · M-11 · M-14)
 # ---------------------------------------------------------------------------
 def demo_remaining_metrics():
@@ -1313,6 +1800,7 @@ def main():
     test_james()
     test_sarah()
     test_amir()
+    test_new_features()
     demo_remaining_metrics()
 
     print("\n" + "█" * 72)
