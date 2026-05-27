@@ -1223,12 +1223,24 @@ def m06_labor_cost(payroll_expense, revenue,
 #            Absolute ceiling = stated_payment_terms + 15-day buffer.
 # ----------------------------------------------------------------------------
 def m07_dso(ar_balance, revenue_90d, dso_history_12wk,
-            stated_payment_terms=30, business_type=""):
-    """Returns (dso, z_dso, mu_dso, sigma_dso)."""
+            stated_payment_terms=30, business_type="", invoice_count=None):
+    """Returns (dso, z_dso, mu_dso, sigma_dso).
+    If invoice_count < 5: returns (dso, None, None, None) — INSUFFICIENT_HISTORY.
+    z-score alert is suppressed; DSO value is still reported for reference.
+    """
     _hdr("M-07 · Receivables DSO  [FIX-M07: use avg AR; ceiling=terms+buffer]")
 
     avg_daily_sales = revenue_90d / 90
     dso = ar_balance / avg_daily_sales
+
+    # Thin-history guard — doc requires ≥ 5 paid invoices for z-score
+    if invoice_count is not None and invoice_count < 5:
+        _step("AR_balance",     "open invoices (QB)",   f"${ar_balance:,.2f}")
+        _step("DSO",            "AR / avg_daily_sales", f"{dso:.4f} days")
+        _step("invoice_count",  "paid invoices",        f"{invoice_count}")
+        print(f"  ⚠️  [M-07] INSUFFICIENT_HISTORY — {invoice_count} paid invoice(s); "
+              f"need ≥ 5 for z-score.  DSO={dso:.1f}d reported, no statistical alert.")
+        return dso, None, None, None
 
     # Vertical ceiling takes priority; fallback to terms+15 [FIX-M07] [VERTICAL_CONFIG]
     vc = VERTICAL_CONFIG.get(business_type, {}).get("m07_dso", {})
@@ -1279,8 +1291,9 @@ def m08_client_delay(client_name, days_overdue, payment_history_days,
     print(f"  History ({n} invoices): {payment_history_days}")
 
     if n < min_invoices:
-        print(f"  ⚠️  Only {n} invoices — need ≥ {min_invoices} to activate z-score "
-              f"[FIX-M08]. Use standard '30 days overdue' fallback.")
+        print(f"  ⚠️  [M-08] INSUFFICIENT_HISTORY — {n} invoice(s); "
+              f"need ≥ {min_invoices} for per-client z-score [FIX-M08].  "
+              f"No alert fired.  Use standard 30-day-overdue fallback.")
         return None, None, None, False
 
     client_avg   = _mean(payment_history_days)
@@ -1367,8 +1380,21 @@ def m09_vendor_anomaly(vendor_name, this_week_charge, history_12wk,
 #            (Our 12-week pooled history already approximates s_pooled.)
 # ----------------------------------------------------------------------------
 def m10_revenue_trend(this_week_revenue, history_12wk, seasonal_index=1.0):
-    """Returns (revenue_z, seasonal_expected, mu, sigma)."""
+    """Returns (revenue_z, seasonal_expected, mu, sigma).
+    If len(history_12wk) < 12: returns (None, None, None, None) — INSUFFICIENT_HISTORY.
+    Benchmark-based low-confidence label is printed; no z-score alert fires.
+    """
     _hdr("M-10 · Weekly Revenue Trend  [FIX-M10: s_pooled not per-week stdev]")
+
+    # Thin-history guard — doc requires ≥ 12 weeks (3 months) for z-score baseline
+    n_wks = len(history_12wk)
+    if n_wks < 12:
+        _step("this_week_revenue", "Plaid / POS",       f"${this_week_revenue:,.2f}")
+        _step("history_weeks",     "weeks available",   f"{n_wks}")
+        print(f"  ⚠️  [M-10] INSUFFICIENT_HISTORY — {n_wks} week(s) of data; "
+              f"need ≥ 12 for z-score baseline.  "
+              f"Confidence: BENCHMARK_BASED_LOW.  No statistical alert fired.")
+        return None, None, None, None
 
     mu    = _mean(history_12wk)
     sigma = _sample_stdev(history_12wk)   # pooled across all weeks [FIX-M10]
@@ -1595,10 +1621,12 @@ def _score_gst(gap, owing):
 
 def m15_expansion_score(dso_days, gross_margin_pct, coverage_ratio,
                          runway_months, gst_reserve_gap, est_gst_owing,
-                         data_quality_score):
+                         data_quality_score, months_of_data=None):
     """
     [FIX-M15] Returns (score, band_label, component_scores).
     Score is reported as a band — false precision removed.
+    If months_of_data < 3: band is marked PARTIAL and a notice is printed.
+    Score is still computed — use it as directional only.
     """
     _hdr("M-15 · Expansion Readiness Score  [FIX-M15: band, not false decimal]")
 
@@ -1637,6 +1665,12 @@ def m15_expansion_score(dso_days, gross_margin_pct, coverage_ratio,
     elif total >= 60: band = "Nearly ready     (60–79)"
     elif total >= 40: band = "Needs work        (40–59)"
     else:             band = "Stabilise first    (< 40)"
+
+    # Thin-history flag — doc: under 3 months, score is directional only
+    if months_of_data is not None and months_of_data < 3:
+        band = band + "  [PARTIAL — <3 months data]"
+        print(f"  ⚠️  [M-15] PARTIAL score — only {months_of_data} month(s) of data.  "
+              f"Score is directional only; do not use as a hard gate.")
 
     print(f"\n  [FIX-M15] Score band: '{band}'  (not reported as {total:.2f}/100)")
     return total, band, scores
@@ -2034,6 +2068,94 @@ def test_new_features():
 
 
 # ---------------------------------------------------------------------------
+# THIN-HISTORY EDGE-CASE ASSERTIONS
+# ---------------------------------------------------------------------------
+def test_thin_history():
+    """
+    Eight assertions across four metrics proving that insufficient history
+    produces a clearly-labelled degraded state — NOT a spurious alert.
+    """
+
+    def _cap(fn, *args, **kwargs):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            result = fn(*args, **kwargs)
+        return result, buf.getvalue()
+
+    print("\n" + "═" * 72)
+    print("  THIN-HISTORY EDGE-CASE ASSERTIONS")
+    print("  Proves: too-little history → labelled degraded state, not false alert")
+    print("═" * 72)
+
+    # ── TH-01  M-07: 3 paid invoices (< 5 required) ──────────────────────
+    print("\n  ── TH-01  M-07  invoice_count=3 (need ≥ 5)")
+    result_07, out_07 = _cap(
+        m07_dso, 3_000.0, 90_000.0,
+        [30.0] * 8,                          # history ignored on this path
+        stated_payment_terms=30, invoice_count=3,
+    )
+    dso_th, z_th, mu_th, sig_th = result_07
+    for ln in out_07.splitlines():
+        print("  " + ln)
+
+    _check("TH-01  M-07 invoice_count=3 → z_dso is None (z-score suppressed)",
+           float(z_th is None), 1.0, tol=0.0)
+    _check("TH-01  M-07 DSO value still returned (3000 / (90000/90) = 3d)",
+           dso_th, 3.0, tol=0.01)
+    _check("TH-01  M-07 output contains 'INSUFFICIENT_HISTORY'",
+           float("INSUFFICIENT_HISTORY" in out_07), 1.0, tol=0.0)
+
+    # ── TH-02  M-08: 4 invoices (< 6 required) ───────────────────────────
+    print("\n  ── TH-02  M-08  4-invoice history (need ≥ 6)")
+    result_08, out_08 = _cap(
+        m08_client_delay, "Thin Client Co", 35, [28, 30, 32, 29],
+    )
+    avg_th, std_th, z_th2, fires_th = result_08
+    for ln in out_08.splitlines():
+        print("  " + ln)
+
+    _check("TH-02  M-08 4 invoices → alert_fires=False",
+           float(fires_th), 0.0, tol=0.0)
+    _check("TH-02  M-08 4 invoices → client_z is None",
+           float(z_th2 is None), 1.0, tol=0.0)
+    _check("TH-02  M-08 output contains 'INSUFFICIENT_HISTORY'",
+           float("INSUFFICIENT_HISTORY" in out_08), 1.0, tol=0.0)
+
+    # ── TH-03  M-10: 4 weeks of history (< 12 required) ──────────────────
+    print("\n  ── TH-03  M-10  4-week history (need ≥ 12)")
+    result_10, out_10 = _cap(
+        m10_revenue_trend, 38_000.0, [36_000, 37_000, 39_000, 40_000],
+    )
+    z_th3, exp_th3, mu_th3, sig_th3 = result_10
+    for ln in out_10.splitlines():
+        print("  " + ln)
+
+    _check("TH-03  M-10 4 weeks → revenue_z is None (no statistical alert)",
+           float(z_th3 is None), 1.0, tol=0.0)
+    _check("TH-03  M-10 output contains 'INSUFFICIENT_HISTORY'",
+           float("INSUFFICIENT_HISTORY" in out_10), 1.0, tol=0.0)
+
+    # ── TH-04  M-15: months_of_data=2 (< 3 required) ─────────────────────
+    print("\n  ── TH-04  M-15  months_of_data=2 (need ≥ 3)")
+    result_15, out_15 = _cap(
+        m15_expansion_score,
+        dso_days=10, gross_margin_pct=62, coverage_ratio=1.2,
+        runway_months=6, gst_reserve_gap=0, est_gst_owing=1_000,
+        data_quality_score=80, months_of_data=2,
+    )
+    score_th, band_th, comp_th = result_15
+    for ln in out_15.splitlines():
+        print("  " + ln)
+
+    _check("TH-04  M-15 months_of_data=2 → band contains 'PARTIAL'",
+           float("PARTIAL" in band_th), 1.0, tol=0.0)
+    _check("TH-04  M-15 score still computed (not None — directional use)",
+           float(score_th is not None), 1.0, tol=0.0)
+    _check("TH-04  M-15 output contains 'PARTIAL'",
+           float("PARTIAL" in out_15), 1.0, tol=0.0)
+
+
+# ---------------------------------------------------------------------------
 # VERTICAL ROUTING ASSERTIONS
 # ---------------------------------------------------------------------------
 def test_vertical_routing():
@@ -2307,6 +2429,7 @@ def main():
     test_sarah()
     test_amir()
     test_new_features()
+    test_thin_history()
     test_vertical_routing()
     _print_vertical_config()
     demo_remaining_metrics()
