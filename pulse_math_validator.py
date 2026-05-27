@@ -256,6 +256,34 @@ VERTICAL_CONFIG = {
         },
     },
 
+    # ── Fine-dining restaurant ───────────────────────────────────────────────
+    # Source: Pulse_Metrics.docx sub-vertical food-cost breakdowns.
+    # Higher food quality lifts healthy range vs. standard restaurant (28–34%).
+    "fine_dining": {
+        "m05_food_cost": {
+            "healthy_lo":        30,   "healthy_hi": 38,  # %
+            "alert_abs_ceiling": 42,   # alert if sustained above 42%
+        },
+    },
+
+    # ── Café ─────────────────────────────────────────────────────────────────
+    # Lower food cost range than full-service — beverages drive margin.
+    "cafe": {
+        "m05_food_cost": {
+            "healthy_lo":        25,   "healthy_hi": 35,  # %
+            "alert_abs_ceiling": 30,
+        },
+    },
+
+    # ── Bar ──────────────────────────────────────────────────────────────────
+    # Lowest food cost range — alcohol/beverage margin dominates.
+    "bar": {
+        "m05_food_cost": {
+            "healthy_lo":        18,   "healthy_hi": 26,  # %
+            "alert_abs_ceiling": 30,
+        },
+    },
+
     # ── M-09 vendor tolerance (keyed by vendor type, not business type) ──────
     # Source: Table 36 in Pulse_Metrics (4).docx.
     # The doc structures this by vendor category because each vendor has its own
@@ -1141,12 +1169,14 @@ def m04_gross_margin(revenue, cogs, business_type=""):
 # ----------------------------------------------------------------------------
 S_FLOOR_FOOD_COST = 0.50   # [FIX-M05] minimum stdev in percentage points
 
-def m05_food_cost(food_cogs, food_revenue, history_12wk):
+def m05_food_cost(food_cogs, food_revenue, history_12wk, business_type=None):
     """Returns (food_cost_pct, z_food, mu, sigma_eff), or (None)*4 if DATA_QUALITY_FLAG.
     Guards (checked before any division):
       food_revenue ≤ 0       → DATA_QUALITY_FLAG
       food_cogs == 0         → DATA_QUALITY_FLAG (0% food cost implied)
       food_cogs ≥ food_revenue → DATA_QUALITY_FLAG (≥ 100% food cost)
+    GAP-1: business_type (fine_dining, cafe, bar, restaurant, …) looks up
+    alert_abs_ceiling from VERTICAL_CONFIG instead of hardcoded threshold.
     """
     _hdr("M-05 · Food Cost %  [FIX-M05: s_floor=0.5 pp; z>4 → VERIFY DATA]")
     _step("food_COGS",    "Toast / QB",               f"${food_cogs:,.2f}")
@@ -1200,6 +1230,23 @@ def m05_food_cost(food_cogs, food_revenue, history_12wk):
         print(f"  ⚠️  ALERT — z={z:.2f} > t-threshold {T_THRESHOLD_N12}")
     else:
         print(f"  ✅ No alert — z={z:.2f}")
+
+    # Vertical absolute ceiling [VERTICAL_CONFIG]  [GAP-1]
+    # When business_type is supplied, look up alert_abs_ceiling from the config
+    # (covers fine_dining/cafe/bar sub-verticals as well as restaurant/qsr).
+    if business_type is not None:
+        vc = VERTICAL_CONFIG.get(business_type, {}).get("m05_food_cost", {})
+        abs_ceil = vc.get("alert_abs_ceiling")
+        if abs_ceil is not None:
+            _step("vertical abs ceiling",
+                  f"VERTICAL_CONFIG[{business_type!r}]",
+                  f"{abs_ceil}%")
+            if food_cost_pct > abs_ceil:
+                print(f"  ⚠️  [M-05] abs ceiling breach: {food_cost_pct:.2f}% > {abs_ceil}% "
+                      f"({business_type} threshold)")
+            else:
+                print(f"  ✅ [M-05] below vertical ceiling {abs_ceil}% ({business_type}): "
+                      f"{food_cost_pct:.2f}%")
 
     return food_cost_pct, z, mu, sigma_eff
 
@@ -1414,16 +1461,35 @@ def bonferroni_z_cutoff(n_vendors, family_wise_alpha=0.05):
     return 3.300   # conservative for very large vendor sets
 
 def m09_vendor_anomaly(vendor_name, this_week_charge, history_12wk,
-                        n_vendors_total=1):
+                        n_vendors_total=1, vendor_type=None):
     """
     [FIX-M09] z cutoff scales with total vendors tested simultaneously.
+    GAP-2: vendor_type routes to VERTICAL_CONFIG['m09_vendor_tolerance'] rules.
+
+    vendor_type rules (from VERTICAL_CONFIG['m09_vendor_tolerance']):
+      'new_vendor'        — first-appearance notification only; no z-score.
+                            Returns (None, None, None, 'new_vendor_notification').
+      'saas_subscription' — alert if |charge − mean| > $1.00 (expected: flat).
+      'produce'           — alert only if >20% above mean (seasonal spikes ok).
+      'utility'           — no alert; ±10% seasonal variation expected.
+      None / anything else — existing Bonferroni z-score path (default).
+
+    Existing callers without vendor_type fall through to the default path.
     Returns (vendor_z, mu, sigma, cutoff).
     """
     _hdr(f"M-09 · Vendor Anomaly — {vendor_name}"
          f"  [FIX-M09: Bonferroni cutoff for {n_vendors_total} vendor(s)]")
 
+    # ── new_vendor: first-appearance — notification only, no z-score ──────
+    if vendor_type == "new_vendor":
+        print(f"  ℹ️  [M-09] vendor_type=new_vendor — '{vendor_name}' is a first appearance.")
+        print(f"       Route: NEW_VENDOR_NOTIFICATION  (not a z-score financial alert).")
+        print(f"       Action: flag for owner review; no financial alert fired.")
+        return None, None, None, "new_vendor_notification"
+
+    # Compute base stats shared by all remaining paths
     z, mu, sigma = _z_score(this_week_charge, history_12wk)
-    pct_above    = (this_week_charge - mu) / mu * 100
+    pct_above    = (this_week_charge - mu) / mu * 100 if mu > 0 else 0.0
     cutoff       = bonferroni_z_cutoff(n_vendors_total)
 
     _step("this_week_charge",  vendor_name,               f"${this_week_charge:,.2f}")
@@ -1431,9 +1497,42 @@ def m09_vendor_anomaly(vendor_name, this_week_charge, history_12wk,
     _step("12wk stdev",        "sample stdev",            f"${sigma:,.2f}")
     _step("vendor_z",          "(charge − mean) / stdev", f"{z:.4f}")
     _step("% above norm",      "(charge − mean) / mean",  f"{pct_above:.1f}%")
+
+    # ── saas_subscription: alert on any deviation above $1.00 ────────────
+    if vendor_type == "saas_subscription":
+        deviation = abs(this_week_charge - mu)
+        _step("$ deviation",       "|charge − mean|",         f"${deviation:.2f}")
+        print(f"  [M-09] vendor_type=saas_subscription — expected flat; "
+              f"alert if |Δ| > $1.00")
+        if deviation > 1.0:
+            print(f"  ⚠️  [M-09] ALERT — SaaS charge changed by ${deviation:.2f} "
+                  f"(expected flat, tolerance $1.00)")
+        else:
+            print(f"  ✅ [M-09] SaaS charge within $1.00 of mean — no alert")
+        return z, mu, sigma, cutoff
+
+    # ── produce: alert only if >20% above mean ────────────────────────────
+    if vendor_type == "produce":
+        print(f"  [M-09] vendor_type=produce — alert only if >20% above mean "
+              f"(seasonal spikes ≤20% normal)")
+        if pct_above > 20.0:
+            print(f"  ⚠️  [M-09] ALERT — produce spike {pct_above:.1f}% above mean "
+                  f"(threshold: >20%)")
+        else:
+            print(f"  ✅ [M-09] Produce: {pct_above:.1f}% ≤ 20% threshold — no alert")
+        return z, mu, sigma, cutoff
+
+    # ── utility: no alert (±10% seasonal variation expected) ─────────────
+    if vendor_type == "utility":
+        print(f"  [M-09] vendor_type=utility — ±10% seasonal variation expected; "
+              f"no alert threshold")
+        print(f"  ✅ [M-09] Utility: {pct_above:.1f}% deviation — "
+              f"within expected seasonal range")
+        return z, mu, sigma, cutoff
+
+    # ── default: existing Bonferroni z-score path ──────────────────────────
     _step("Bonferroni cutoff", f"z for {n_vendors_total} vendors [FIX-M09]",
           f"{cutoff}", f"vs flat 2.0 in original spec")
-
     _route_z_signal(z, "M-09 vendor", direction="high", threshold=cutoff)  # [CHANGE 3]
     return z, mu, sigma, cutoff
 
@@ -1691,28 +1790,57 @@ def m15_expansion_score(dso_days, gross_margin_pct, coverage_ratio,
     Score is reported as a band — false precision removed.
     If months_of_data < 3: band is marked PARTIAL and a notice is printed.
     Score is still computed — use it as directional only.
+
+    GAP-3: upstream-None propagation guard.
+    Any input that is None (DATA_QUALITY_FLAG or INSUFFICIENT_HISTORY from an
+    upstream metric) is down-weighted to zero.  The function never crashes —
+    it degrades gracefully to a partial score over available components.
+    The band label lists which components were unavailable.
     """
     _hdr("M-15 · Expansion Readiness Score  [FIX-M15: band, not false decimal]")
 
     W = {"dso": 0.20, "margin": 0.20, "coverage": 0.20,
          "runway": 0.20, "gst": 0.10, "data_quality": 0.10}
 
+    # ── GAP-3: upstream-None propagation guard ────────────────────────────
+    # Detect which components have None inputs (upstream metric failed).
+    # Each unavailable component is scored 0 and listed in the band notice.
+    unavailable = []
+    if dso_days           is None: unavailable.append("dso")
+    if gross_margin_pct   is None: unavailable.append("margin")
+    if coverage_ratio     is None: unavailable.append("coverage")
+    if runway_months      is None: unavailable.append("runway")
+    if gst_reserve_gap    is None or est_gst_owing is None:
+        unavailable.append("gst")
+    if data_quality_score is None: unavailable.append("data_quality")
+
+    if unavailable:
+        print(f"  ⚠️  [M-15] GAP-3 upstream-None guard: {len(unavailable)} component(s) "
+              f"unavailable — {unavailable}")
+        print(f"       Down-weighted to 0.  Score is partial over available components only.")
+
+    # Build scores: None inputs contribute 0 instead of crashing
     scores = {
-        "dso":          _score_dso(dso_days),
-        "margin":       _score_margin(gross_margin_pct),
-        "coverage":     _score_coverage(coverage_ratio),
-        "runway":       _score_runway(runway_months),
-        "gst":          _score_gst(gst_reserve_gap, est_gst_owing),
-        "data_quality": data_quality_score,
+        "dso":          0.0 if "dso"          in unavailable else _score_dso(dso_days),
+        "margin":       0.0 if "margin"        in unavailable else _score_margin(gross_margin_pct),
+        "coverage":     0.0 if "coverage"      in unavailable else _score_coverage(coverage_ratio),
+        "runway":       0.0 if "runway"        in unavailable else _score_runway(runway_months),
+        "gst":          0.0 if "gst"           in unavailable else _score_gst(gst_reserve_gap, est_gst_owing),
+        "data_quality": 0.0 if "data_quality"  in unavailable else data_quality_score,
     }
 
+    # Build formula strings safely — never format None
+    def _fmt_coverage():
+        if "coverage" in unavailable: return "N/A (upstream None)"
+        return f"ratio={coverage_ratio:.2f}→{'100 (clip)' if coverage_ratio >= 1.5 else 'formula'}"
+
     formulas = {
-        "dso":      f"(1−{dso_days}/60)×100",
-        "margin":   f"({gross_margin_pct}−20)/(70−20)×100",
-        "coverage": f"ratio={coverage_ratio:.2f}→{'100 (clip)' if coverage_ratio>=1.5 else 'formula'}",
-        "runway":   f"({runway_months:.2f}−3)/15×100",
-        "gst":      f"100×(1−{gst_reserve_gap}/{est_gst_owing})",
-        "data_quality": "manual",
+        "dso":          "N/A (upstream None)" if "dso"          in unavailable else f"(1−{dso_days}/60)×100",
+        "margin":       "N/A (upstream None)" if "margin"       in unavailable else f"({gross_margin_pct}−20)/(70−20)×100",
+        "coverage":     _fmt_coverage(),
+        "runway":       "N/A (upstream None)" if "runway"       in unavailable else f"({runway_months:.2f}−3)/15×100",
+        "gst":          "N/A (upstream None)" if "gst"          in unavailable else f"100×(1−{gst_reserve_gap}/{est_gst_owing})",
+        "data_quality": "N/A (upstream None)" if "data_quality" in unavailable else "manual",
     }
 
     print(f"\n  {'Component':<14} {'Formula':<40} {'Score':>7} {'Wt':>5} {'Wtd':>8}")
@@ -1721,7 +1849,8 @@ def m15_expansion_score(dso_days, gross_margin_pct, coverage_ratio,
     for k in W:
         s, w, wt = scores[k], W[k], scores[k] * W[k]
         total += wt
-        print(f"  {k:<14} {formulas[k]:<40} {s:>7.1f} {w:>5.2f} {wt:>8.2f}")
+        note = "  ← N/A" if k in unavailable else ""
+        print(f"  {k:<14} {formulas[k]:<40} {s:>7.1f} {w:>5.2f} {wt:>8.2f}{note}")
     print(f"  {'─'*14} {'─'*40} {'─'*7} {'─'*5} {'─'*8}")
     print(f"  {'TOTAL':<14} {'':<40} {'':<7} {'':<5} {total:>8.2f}")
 
@@ -1735,6 +1864,10 @@ def m15_expansion_score(dso_days, gross_margin_pct, coverage_ratio,
         band = band + "  [PARTIAL — <3 months data]"
         print(f"  ⚠️  [M-15] PARTIAL score — only {months_of_data} month(s) of data.  "
               f"Score is directional only; do not use as a hard gate.")
+
+    # GAP-3: append unavailable component list to band string
+    if unavailable:
+        band = band + f"  [components unavailable: {', '.join(unavailable)}]"
 
     print(f"\n  [FIX-M15] Score band: '{band}'  (not reported as {total:.2f}/100)")
     return total, band, scores
@@ -2597,6 +2730,227 @@ def demo_remaining_metrics():
           f"(fixed / (1 − 0.35))")
 
 
+# ---------------------------------------------------------------------------
+# GAP-1 ASSERTIONS — M-05 fine_dining / cafe / bar sub-vertical routing
+# ---------------------------------------------------------------------------
+def test_gap1_m05_vertical():
+    """
+    Three assertion pairs proving that VERTICAL_CONFIG thresholds for
+    fine_dining (42%), cafe (30%), and bar (30%) alter M-05 alert behaviour
+    for identical numeric inputs based on business_type.
+    """
+
+    def _cap(fn, *args, **kwargs):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            result = fn(*args, **kwargs)
+        return result, buf.getvalue()
+
+    print("\n" + "═" * 72)
+    print("  GAP-1 ASSERTIONS — M-05 sub-vertical ceiling routing")
+    print("  fine_dining 42% · cafe 30% · bar 30%")
+    print("═" * 72)
+
+    # Flat history so z-score only reflects the new value, not noise.
+    HIST = [30.0] * 12
+    REV  = 10_000.0   # denominator for food cost %
+
+    # ── GP1-01  fine_dining: food_cost = 43.5% (> 42% ceil) → fires ─────
+    print("\n  ── GP1-01  fine_dining  43.5% > ceil 42%  →  expect breach")
+    r1, out1 = _cap(m05_food_cost, 4_350.0, REV, HIST, business_type="fine_dining")
+
+    # ── GP1-02  fine_dining: food_cost = 35.0% (< 42% ceil) → silent ────
+    print("\n  ── GP1-02  fine_dining  35.0% < ceil 42%  →  expect silent")
+    r2, out2 = _cap(m05_food_cost, 3_500.0, REV, HIST, business_type="fine_dining")
+
+    # ── GP1-03  cafe: food_cost = 31.0% (> 30% ceil) → fires ─────────────
+    print("\n  ── GP1-03  cafe  31.0% > ceil 30%  →  expect breach")
+    r3, out3 = _cap(m05_food_cost, 3_100.0, REV, HIST, business_type="cafe")
+
+    # ── GP1-04  bar: food_cost = 29.0% (> 30% ceil = no, wait 29 < 30) ──
+    # bar ceil = 30%; 27% < 30% → silent
+    print("\n  ── GP1-04  bar  27.0% < ceil 30%  →  expect silent")
+    r4, out4 = _cap(m05_food_cost, 2_700.0, REV, HIST, business_type="bar")
+
+    # ── GP1-05  no business_type → backward-compat, no vertical check ────
+    print("\n  ── GP1-05  no business_type (backward compat) → no vertical output")
+    r5, out5 = _cap(m05_food_cost, 4_350.0, REV, HIST)
+
+    print("\n  ── Assertions ──")
+    _check("GP1-01  fine_dining 43.5% > ceil 42% → abs ceiling FIRES",
+           float("[M-05] abs ceiling breach" in out1), 1.0, tol=0.0)
+    _check("GP1-02  fine_dining 35.0% < ceil 42% → abs ceiling SILENT",
+           float("[M-05] abs ceiling breach" not in out2), 1.0, tol=0.0)
+    _check("GP1-03  cafe 31.0% > ceil 30% → abs ceiling FIRES",
+           float("[M-05] abs ceiling breach" in out3), 1.0, tol=0.0)
+    _check("GP1-04  bar 27.0% < ceil 30% → abs ceiling SILENT",
+           float("[M-05] abs ceiling breach" not in out4), 1.0, tol=0.0)
+    _check("GP1-05  no business_type → no vertical lookup in output",
+           float("vertical abs ceiling" not in out5), 1.0, tol=0.0)
+    _check("GP1-CONFIG  fine_dining alert_abs_ceiling = 42",
+           float(VERTICAL_CONFIG["fine_dining"]["m05_food_cost"]["alert_abs_ceiling"] == 42),
+           1.0, tol=0.0)
+    _check("GP1-CONFIG  cafe alert_abs_ceiling = 30",
+           float(VERTICAL_CONFIG["cafe"]["m05_food_cost"]["alert_abs_ceiling"] == 30),
+           1.0, tol=0.0)
+    _check("GP1-CONFIG  bar alert_abs_ceiling = 30",
+           float(VERTICAL_CONFIG["bar"]["m05_food_cost"]["alert_abs_ceiling"] == 30),
+           1.0, tol=0.0)
+
+
+# ---------------------------------------------------------------------------
+# GAP-2 ASSERTIONS — M-09 vendor_type routing
+# ---------------------------------------------------------------------------
+def test_gap2_m09_vendor_type():
+    """
+    Six assertions proving that vendor_type routes M-09 to the correct rule
+    from VERTICAL_CONFIG['m09_vendor_tolerance'] — independent of z-score magnitude.
+    """
+
+    def _cap(fn, *args, **kwargs):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            result = fn(*args, **kwargs)
+        return result, buf.getvalue()
+
+    print("\n" + "═" * 72)
+    print("  GAP-2 ASSERTIONS — M-09 vendor_type routing")
+    print("  new_vendor · saas_subscription · produce · utility · default")
+    print("═" * 72)
+
+    # Flat history so pct_above is unambiguous.
+    VHIST = [500.0] * 12   # mean=$500, stdev=0
+
+    # ── GP2-01  new_vendor → notification, no z-score ─────────────────────
+    print("\n  ── GP2-01  vendor_type=new_vendor  →  notification-only")
+    r1, out1 = _cap(m09_vendor_anomaly, "Fresh Foods Inc", 850.0, VHIST,
+                    vendor_type="new_vendor")
+    z1, mu1, sigma1, cutoff1 = r1
+    for ln in out1.splitlines(): print("  " + ln)
+
+    # ── GP2-02  saas $550 vs mean $500 (dev=$50 > $1) → ALERT ─────────────
+    print("\n  ── GP2-02  saas  $550 vs mean $500  dev=$50 > $1  →  ALERT")
+    r2, out2 = _cap(m09_vendor_anomaly, "Slack", 550.0, VHIST,
+                    vendor_type="saas_subscription")
+    for ln in out2.splitlines(): print("  " + ln)
+
+    # ── GP2-03  saas $500.50 vs mean $500 (dev=$0.50 ≤ $1) → no alert ────
+    print("\n  ── GP2-03  saas  $500.50 vs mean $500  dev=$0.50 ≤ $1  →  no alert")
+    r3, out3 = _cap(m09_vendor_anomaly, "Slack", 500.50, VHIST,
+                    vendor_type="saas_subscription")
+    for ln in out3.splitlines(): print("  " + ln)
+
+    # ── GP2-04  produce 25% spike → ALERT (>20%) ──────────────────────────
+    print("\n  ── GP2-04  produce  $625 vs mean $500  25% spike  →  ALERT")
+    r4, out4 = _cap(m09_vendor_anomaly, "Metro Produce", 625.0, VHIST,
+                    vendor_type="produce")
+    for ln in out4.splitlines(): print("  " + ln)
+
+    # ── GP2-05  produce 15% spike → no alert (≤20%) ──────────────────────
+    print("\n  ── GP2-05  produce  $575 vs mean $500  15% spike  →  no alert")
+    r5, out5 = _cap(m09_vendor_anomaly, "Metro Produce", 575.0, VHIST,
+                    vendor_type="produce")
+    for ln in out5.splitlines(): print("  " + ln)
+
+    # ── GP2-06  utility with 40% spike → no alert (seasonal) ─────────────
+    print("\n  ── GP2-06  utility  $700 vs mean $500  40% deviation  →  no alert")
+    r6, out6 = _cap(m09_vendor_anomaly, "BC Hydro", 700.0, VHIST,
+                    vendor_type="utility")
+    for ln in out6.splitlines(): print("  " + ln)
+
+    print("\n  ── Assertions ──")
+    _check("GP2-01  new_vendor → z is None (no z-score computed)",
+           float(z1 is None), 1.0, tol=0.0)
+    _check("GP2-01  new_vendor → cutoff is 'new_vendor_notification'",
+           float(cutoff1 == "new_vendor_notification"), 1.0, tol=0.0)
+    _check("GP2-02  saas dev=$50 > $1 → ALERT fires",
+           float("[M-09] ALERT" in out2), 1.0, tol=0.0)
+    _check("GP2-03  saas dev=$0.50 ≤ $1 → no ALERT fires",
+           float("[M-09] ALERT" not in out3), 1.0, tol=0.0)
+    _check("GP2-04  produce 25% spike → ALERT fires",
+           float("[M-09] ALERT" in out4), 1.0, tol=0.0)
+    _check("GP2-05  produce 15% spike → no ALERT fires",
+           float("[M-09] ALERT" not in out5), 1.0, tol=0.0)
+    _check("GP2-06  utility 40% deviation → no ALERT fires",
+           float("[M-09] ALERT" not in out6), 1.0, tol=0.0)
+
+
+# ---------------------------------------------------------------------------
+# GAP-3 ASSERTIONS — M-15 upstream-None propagation guard
+# ---------------------------------------------------------------------------
+def test_gap3_m15_none_guard():
+    """
+    Seven assertions proving that M-15 degrades gracefully when upstream
+    metrics return None (DATA_QUALITY_FLAG / INSUFFICIENT_HISTORY).
+    The score never crashes; unavailable components are zeroed and listed.
+    """
+
+    def _cap(fn, *args, **kwargs):
+        buf = io.StringIO()
+        with contextlib.redirect_stdout(buf):
+            result = fn(*args, **kwargs)
+        return result, buf.getvalue()
+
+    print("\n" + "═" * 72)
+    print("  GAP-3 ASSERTIONS — M-15 upstream-None propagation guard")
+    print("  Proves: None inputs → partial score, never a crash")
+    print("═" * 72)
+
+    # ── GP3-01  runway_months=None (M-13 returned None) ──────────────────
+    print("\n  ── GP3-01  runway_months=None  →  partial score, runway zeroed")
+    r1, out1 = _cap(
+        m15_expansion_score,
+        dso_days=5.0, gross_margin_pct=65.0, coverage_ratio=1.5,
+        runway_months=None,           # ← upstream M-13 failure
+        gst_reserve_gap=200.0, est_gst_owing=1_000.0,
+        data_quality_score=75.0,
+    )
+    score1, band1, comp1 = r1
+    for ln in out1.splitlines(): print("  " + ln)
+    print()
+
+    # ── GP3-02  two Nones: runway + coverage ─────────────────────────────
+    print("\n  ── GP3-02  runway=None + coverage=None  →  both listed in band")
+    r2, out2 = _cap(
+        m15_expansion_score,
+        dso_days=5.0, gross_margin_pct=65.0, coverage_ratio=None,
+        runway_months=None,
+        gst_reserve_gap=200.0, est_gst_owing=1_000.0,
+        data_quality_score=75.0,
+    )
+    score2, band2, comp2 = r2
+    for ln in out2.splitlines(): print("  " + ln)
+    print()
+
+    # ── GP3-03  gst inputs None (both) ───────────────────────────────────
+    print("\n  ── GP3-03  gst_reserve_gap=None  →  gst component zeroed")
+    r3, out3 = _cap(
+        m15_expansion_score,
+        dso_days=5.0, gross_margin_pct=65.0, coverage_ratio=1.5,
+        runway_months=8.0,
+        gst_reserve_gap=None, est_gst_owing=None,
+        data_quality_score=75.0,
+    )
+    score3, band3, comp3 = r3
+    for ln in out3.splitlines(): print("  " + ln)
+
+    print("\n  ── Assertions ──")
+    _check("GP3-01  score returned (not None) when runway=None",
+           float(score1 is not None), 1.0, tol=0.0)
+    _check("GP3-01  band contains 'components unavailable'",
+           float("components unavailable" in band1), 1.0, tol=0.0)
+    _check("GP3-01  runway component score down-weighted to 0",
+           comp1["runway"], 0.0, tol=0.001)
+    _check("GP3-01  non-None components still score normally (dso=5d → ~91.7)",
+           comp1["dso"], _score_dso(5.0), tol=0.1)
+    _check("GP3-02  both runway + coverage in band notice",
+           float("runway" in band2 and "coverage" in band2), 1.0, tol=0.0)
+    _check("GP3-02  coverage score is 0 when coverage=None",
+           comp2["coverage"], 0.0, tol=0.001)
+    _check("GP3-03  gst score is 0 when gst inputs are None",
+           comp3["gst"], 0.0, tol=0.001)
+
+
 # ============================================================================
 # MAIN
 # ============================================================================
@@ -2615,6 +2969,9 @@ def main():
     test_thin_history()
     test_dirty_data()
     test_vertical_routing()
+    test_gap1_m05_vertical()
+    test_gap2_m09_vendor_type()
+    test_gap3_m15_none_guard()
     _print_vertical_config()
     demo_remaining_metrics()
 
