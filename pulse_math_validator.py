@@ -44,6 +44,246 @@ import math
 import random
 
 # ============================================================================
+# VERTICAL_CONFIG — Benchmark thresholds by business type
+# ============================================================================
+# Source: "Benchmarks by vertical" tables in Pulse_Metrics (4).docx
+#
+# Conventions
+# -----------
+# healthy_lo / healthy_hi  — the doc's stated healthy range, both bounds stored.
+# alert_floor              — absolute floor; alert if sustained below (M-04).
+# alert_ceiling            — absolute ceiling; alert if above (M-06, M-07).
+# z_score_only = True      — doc explicitly says no absolute threshold applies;
+#                            alert on z-score deviation only.
+# None                     — the doc gives no data for this metric / vertical.
+#
+# M-09 is keyed by vendor TYPE (produce_supplier, saas_subscription, etc.),
+# not by business type, because each vendor has its own individual baseline.
+# It is stored under the "m09_vendor_tolerance" top-level key.
+#
+# M-15 weights are the same for every vertical in the doc (DSO 20%, margin 20%,
+# coverage 20%, runway 20%, GST 10%, data 10%).  Table 63 notes that startup
+# founders should weight runway/burn/data quality "more heavily" but gives no
+# specific numbers — weight overrides are None for all verticals.
+# ============================================================================
+
+VERTICAL_CONFIG = {
+
+    # ── Full-service restaurant ──────────────────────────────────────────────
+    "restaurant": {
+        "m04_gross_margin": {
+            "healthy_lo":  60,    "healthy_hi": 70,   # %
+            "alert_floor": 55,                         # alert if sustained below
+        },
+        "m05_food_cost": {
+            "healthy_lo":         28,   "healthy_hi": 34,  # %
+            "alert_z_ceiling":    36,   # z-score alert threshold
+            "alert_abs_ceiling":  38,   # absolute alert if sustained above
+        },
+        "m06_labor_cost": {
+            "healthy_lo":    28,  "healthy_hi": 35,   # %
+            "alert_ceiling": 38,                       # alert if >38% for 2+ weeks
+            "z_score_only":  False,
+        },
+        "m07_dso": {
+            "healthy_lo_days":    0,   "healthy_hi_days": 7,
+            "alert_ceiling_days": 14,
+            "notes": "Revenue is point-of-sale. DSO >14d indicates uncollected catering invoices.",
+        },
+        "m10_revenue": {
+            "comparison_window": "week_over_week",
+            "alert_drop_pct":    None,  # doc gives no drop-% for restaurants
+            "notes": "Compare to same day of week, same week of year.",
+        },
+        "m12_project_float": {
+            "min_float_threshold":     None,
+            "min_float_formula":       None,
+            "notes": "Catering float period < 14 days is manageable from operating cash.",
+        },
+        "m14_break_even": {
+            "notes": "~60–70% of capacity. Doc example: 60-seat at $65 avg check needs ~$42,000/week.",
+        },
+        "m15_expansion_score": {
+            "weight_overrides": None,
+            "notes": "Standard weights apply. No vertical override specified in doc.",
+        },
+    },
+
+    # ── Quick-service / fast-casual restaurant ───────────────────────────────
+    # M-04 and M-07: doc does not list QSR separately — no data for those metrics.
+    "quick_service_restaurant": {
+        "m05_food_cost": {
+            "healthy_lo":        25,   "healthy_hi": 31,  # %
+            "alert_abs_ceiling": 33,
+        },
+        "m06_labor_cost": {
+            "healthy_lo":    25,  "healthy_hi": 32,   # %
+            "alert_ceiling": 35,
+            "z_score_only":  False,
+        },
+    },
+
+    # ── General contractor ───────────────────────────────────────────────────
+    "contractor": {
+        "m04_gross_margin": {
+            "healthy_lo":  35,    "healthy_hi": 50,   # %
+            "alert_floor": 30,
+        },
+        "m06_labor_cost": {
+            "healthy_lo":    20,  "healthy_hi": 35,   # %
+            "alert_ceiling": None,                     # z-score only
+            "z_score_only":  True,
+            "notes": "Highly variable. Alert on z-score only.",
+        },
+        "m07_dso": {
+            "healthy_lo_days":    45,  "healthy_hi_days": 60,
+            "alert_ceiling_days": 70,
+            "notes": "Longer payment terms are normal for contractors.",
+        },
+        "m10_revenue": {
+            "comparison_window": "month_over_month",
+            "alert_drop_pct":    None,  # doc gives no drop-% for contractors
+            "notes": "Project-based revenue is lumpy. Monthly more meaningful than weekly.",
+        },
+        "m12_project_float": {
+            "min_float_threshold": 15_000,
+            "min_float_formula":   None,
+            "notes": "Min balance during float > $15,000. Below that: recommend partial line-of-credit draw.",
+        },
+        "m14_break_even": {
+            "notes": "Break-even when utilisation > 30%. High fixed costs (equipment, insurance) reached quickly once on a project.",
+        },
+        "m15_expansion_score": {
+            "weight_overrides": None,
+            "notes": "Standard weights apply. No vertical override specified in doc.",
+        },
+    },
+
+    # ── Service agency ───────────────────────────────────────────────────────
+    "agency": {
+        "m04_gross_margin": {
+            "healthy_lo":  70,    "healthy_hi": 85,   # %
+            "alert_floor": 60,
+        },
+        "m06_labor_cost": {
+            "healthy_lo":    50,  "healthy_hi": 65,   # %
+            "alert_ceiling": None,                     # z-score only
+            "z_score_only":  True,
+            "notes": "Labor IS the product. Z-score only — absolute threshold not meaningful.",
+        },
+        "m07_dso": {
+            "healthy_lo_days":    30,  "healthy_hi_days": 45,
+            "alert_ceiling_days": 45,
+            "notes": "Alert if >45 days consistently.",
+        },
+        "m10_revenue": {
+            "comparison_window": "monthly",
+            "alert_drop_pct":    20,
+            "notes": "Invoice-based revenue should be predictable. Alert if monthly total drops >20%.",
+        },
+        "m12_project_float": {
+            "min_float_threshold": None,
+            "min_float_formula":   "2x_monthly_payroll",
+            "notes": "2× monthly payroll as minimum buffer when staffing a project before first invoice.",
+        },
+        "m14_break_even": {
+            "notes": "40–50% billable utilisation = break-even. Beyond 50% billable is profit.",
+        },
+        "m15_expansion_score": {
+            "weight_overrides": None,
+            "notes": "Standard weights apply. No vertical override specified in doc.",
+        },
+    },
+
+    # ── E-commerce ───────────────────────────────────────────────────────────
+    # M-06: doc does not list e-commerce separately — no data.
+    "ecommerce": {
+        "m04_gross_margin": {
+            "healthy_lo":  40,    "healthy_hi": 60,   # %
+            "alert_floor": 35,
+        },
+        "m07_dso": {
+            "healthy_lo_days":    0,   "healthy_hi_days": 14,
+            "alert_ceiling_days": 21,
+            "notes": "Online payments clear quickly. >21 days indicates disputes.",
+        },
+        "m10_revenue": {
+            "comparison_window": "daily_weekly",
+            "alert_drop_pct":    25,
+            "notes": "Alert if 7-day rolling average drops >25% below 12-week norm.",
+        },
+        "m14_break_even": {
+            "notes": "Contribution margin × units sold.",
+        },
+        "m15_expansion_score": {
+            "weight_overrides": None,
+            "notes": "Standard weights apply. No vertical override specified in doc.",
+        },
+    },
+
+    # ── Software / SaaS startup ──────────────────────────────────────────────
+    # M-06, M-10, M-12, M-14: doc does not list SaaS separately — no data.
+    "saas": {
+        "m04_gross_margin": {
+            "healthy_lo":  75,    "healthy_hi": 90,   # %
+            "alert_floor": 65,
+        },
+        "m07_dso": {
+            "healthy_lo_days":    15,  "healthy_hi_days": 30,
+            "alert_ceiling_days": 45,
+            "notes": "Subscription invoices net-30.",
+        },
+        "m15_expansion_score": {
+            "weight_overrides": None,
+            "notes": (
+                "Doc (Table 63 edge cases) says 'startup founder with no revenue: "
+                "use founder-specific score weighting runway, burn efficiency, and "
+                "data quality more heavily' — but gives no specific weight numbers. "
+                "No numeric override encoded."
+            ),
+        },
+    },
+
+    # ── Retail ───────────────────────────────────────────────────────────────
+    # M-04, M-07, M-10, M-12, M-14: doc does not list retail — no data.
+    "retail": {
+        "m06_labor_cost": {
+            "healthy_lo":    15,  "healthy_hi": 20,   # %
+            "alert_ceiling": 25,
+            "z_score_only":  False,
+        },
+    },
+
+    # ── M-09 vendor tolerance (keyed by vendor type, not business type) ──────
+    # Source: Table 36 in Pulse_Metrics (4).docx.
+    # The doc structures this by vendor category because each vendor has its own
+    # individual baseline; the owning business's vertical is secondary.
+    "m09_vendor_tolerance": {
+        "produce_supplier": {
+            "normal_weekly_variation_pct": 5,
+            "alert_spike_pct":             20,
+            "notes": "Seasonal variation expected. Alert only if >20% spike.",
+        },
+        "saas_subscription": {
+            "expected_variation":  "flat",
+            "alert_on_any_change": True,
+            "notes": "Monthly SaaS charges should be fixed. Any change triggers alert.",
+        },
+        "utility": {
+            "seasonal_variation_pct": 10,
+            "alert_on_any_change":    False,
+            "notes": "Wider tolerance for weather-related variation. Z-score handles automatically.",
+        },
+        "new_vendor": {
+            "alert_type":    "new_vendor_notification",
+            "z_score_alert": False,
+            "notes": "First appearance triggers 'new vendor' notification — not a z-score alert.",
+        },
+    },
+}
+
+
+# ============================================================================
 # SECTION 1 — INPUT DATA
 # ============================================================================
 
@@ -837,7 +1077,7 @@ def m03_gst_reserve_gap(taxable_revenue, gst_rate, itc_expenses,
 # Formula: gross_margin_pct = (revenue − COGS) ÷ revenue × 100
 # [FIX-M04] Z-score caller should use s_floor = 1.0 pp; COGS lag smoothing.
 # ----------------------------------------------------------------------------
-def m04_gross_margin(revenue, cogs):
+def m04_gross_margin(revenue, cogs, business_type=""):
     """Returns gross_margin_pct."""
     _hdr("M-04 · Gross Margin %  [FIX-M04: z-score callers use s_floor=1.0 pp]")
     gross_profit     = revenue - cogs
@@ -846,6 +1086,21 @@ def m04_gross_margin(revenue, cogs):
     _step("COGS",             "QB CostOfGoodsSold",       f"${cogs:,.2f}")
     _step("gross_profit",     "revenue − COGS",           f"${gross_profit:,.2f}")
     _step("gross_margin_pct", "gross_profit/revenue×100", f"{gross_margin_pct:.4f}%")
+
+    # Vertical absolute floor [VERTICAL_CONFIG]
+    vc = VERTICAL_CONFIG.get(business_type, {}).get("m04_gross_margin", {})
+    alert_floor = vc.get("alert_floor")
+    if alert_floor is not None:
+        _step("vertical floor",
+              f"VERTICAL_CONFIG[{business_type!r}]",
+              f"{alert_floor}%")
+        if gross_margin_pct < alert_floor:
+            print(f"  ⚠️  [M-04] abs floor breach: {gross_margin_pct:.2f}% < {alert_floor}% "
+                  f"({business_type} threshold)")
+        else:
+            print(f"  ✅ [M-04] above vertical floor {alert_floor}% ({business_type}): "
+                  f"{gross_margin_pct:.2f}%")
+
     return gross_margin_pct
 
 
@@ -908,7 +1163,8 @@ def m05_food_cost(food_cogs, food_revenue, history_12wk):
 S_FLOOR_LABOR = 0.50   # [FIX-Z0 / FIX-M06]
 
 def m06_labor_cost(payroll_expense, revenue,
-                   labor_history_12wk, revenue_history_12wk):
+                   labor_history_12wk, revenue_history_12wk,
+                   business_type=""):
     """Returns (labor_pct, z_labor, z_revenue, compound_signal_this_week)."""
     _hdr("M-06 · Labor Cost %  [FIX-M06: s_floor; compound requires 2 wks]")
 
@@ -934,6 +1190,24 @@ def m06_labor_cost(payroll_expense, revenue,
 
     compound_this_week = z_labor > 1.5 and z_rev < -1.0
     _route_z_signal(z_labor, "M-06 labor %", direction="high")   # [CHANGE 3]
+
+    # Vertical absolute ceiling [VERTICAL_CONFIG]
+    vc = VERTICAL_CONFIG.get(business_type, {}).get("m06_labor_cost", {})
+    if vc.get("z_score_only"):
+        print(f"  [M-06] vertical={business_type!r}: z-score only — no absolute ceiling")
+    else:
+        abs_ceil = vc.get("alert_ceiling")
+        if abs_ceil is not None:
+            _step("vertical ceiling",
+                  f"VERTICAL_CONFIG[{business_type!r}]",
+                  f"{abs_ceil}%")
+            if labor_pct > abs_ceil:
+                print(f"  ⚠️  [M-06] abs ceiling breach: {labor_pct:.2f}% > {abs_ceil}% "
+                      f"({business_type} threshold)")
+            else:
+                print(f"  ✅ [M-06] below vertical ceiling {abs_ceil}% ({business_type}): "
+                      f"{labor_pct:.2f}%")
+
     print(f"  Compound this week (z_L>1.5 & z_R<−1.0): "
           f"{'YES ⚠️' if compound_this_week else 'No'}")
     print(f"  [FIX-M06] Compound ESCALATES only after 2 consecutive weeks meeting condition.")
@@ -947,20 +1221,28 @@ def m06_labor_cost(payroll_expense, revenue,
 #            Absolute ceiling = stated_payment_terms + 15-day buffer.
 # ----------------------------------------------------------------------------
 def m07_dso(ar_balance, revenue_90d, dso_history_12wk,
-            stated_payment_terms=30):
+            stated_payment_terms=30, business_type=""):
     """Returns (dso, z_dso, mu_dso, sigma_dso)."""
     _hdr("M-07 · Receivables DSO  [FIX-M07: use avg AR; ceiling=terms+buffer]")
 
     avg_daily_sales = revenue_90d / 90
     dso = ar_balance / avg_daily_sales
-    abs_ceiling = stated_payment_terms + 15   # [FIX-M07]
+
+    # Vertical ceiling takes priority; fallback to terms+15 [FIX-M07] [VERTICAL_CONFIG]
+    vc = VERTICAL_CONFIG.get(business_type, {}).get("m07_dso", {})
+    vert_ceiling = vc.get("alert_ceiling_days")
+    if vert_ceiling is not None:
+        abs_ceiling = vert_ceiling
+        ceiling_source = f"VERTICAL_CONFIG[{business_type!r}]"
+    else:
+        abs_ceiling = stated_payment_terms + 15   # [FIX-M07]
+        ceiling_source = f"terms({stated_payment_terms}) + 15d buffer"
 
     _step("AR_balance",         "open invoices (QB)",      f"${ar_balance:,.2f}")
     _step("revenue_last_90d",   "QB P&L trailing 90d",     f"${revenue_90d:,.2f}")
     _step("avg_daily_sales",    "revenue_90d / 90",        f"${avg_daily_sales:,.2f}/day")
     _step("DSO",                "AR / avg_daily_sales",    f"{dso:.4f} days")
-    _step("abs_ceiling [FIX]",  "terms + 15d buffer",
-          f"{abs_ceiling} days", f"was flat {stated_payment_terms} days")
+    _step("abs_ceiling",        ceiling_source,            f"{abs_ceiling} days")
 
     z_dso, mu_dso, sigma_dso = _z_score(dso, dso_history_12wk)
     _step("12wk DSO mean",  "mean of history", f"{mu_dso:.4f} days")
@@ -970,8 +1252,9 @@ def m07_dso(ar_balance, revenue_90d, dso_history_12wk,
           f"{z_dso:.4f}")
 
     _route_z_signal(z_dso, "M-07 DSO", direction="high")          # [CHANGE 3]
-    if dso > abs_ceiling:                                          # absolute ceiling check kept
-        print(f"  ⚠️  [M-07 DSO] abs ceiling breach: {dso:.1f}d > {abs_ceiling}d")
+    if dso > abs_ceiling:
+        print(f"  ⚠️  [M-07 DSO] abs ceiling breach: {dso:.1f}d > {abs_ceiling}d "
+              f"({ceiling_source})")
     return dso, z_dso, mu_dso, sigma_dso
 
 
@@ -1749,6 +2032,109 @@ def test_new_features():
 
 
 # ---------------------------------------------------------------------------
+# VERTICAL CONFIG PRINTER
+# ---------------------------------------------------------------------------
+def _print_vertical_config():
+    """Print VERTICAL_CONFIG in a readable, doc-comparable layout."""
+    VERTICAL_ORDER = [
+        "restaurant", "quick_service_restaurant", "contractor",
+        "agency", "ecommerce", "saas", "retail",
+    ]
+    METRIC_LABELS = {
+        "m04_gross_margin": "M-04 Gross Margin %",
+        "m05_food_cost":    "M-05 Food Cost %",
+        "m06_labor_cost":   "M-06 Labor Cost %",
+        "m07_dso":          "M-07 DSO (days)",
+        "m10_revenue":      "M-10 Revenue Trend",
+        "m12_project_float":"M-12 Project Float",
+        "m14_break_even":   "M-14 Break-Even",
+        "m15_expansion_score": "M-15 Expansion Score",
+    }
+
+    print("\n" + "═" * 72)
+    print("  VERTICAL_CONFIG  —  Benchmarks by Business Type")
+    print("  Source: Pulse_Metrics.docx  §  Benchmarks by vertical")
+    print("═" * 72)
+
+    for vertical in VERTICAL_ORDER:
+        cfg = VERTICAL_CONFIG.get(vertical)
+        if cfg is None:
+            continue
+        label = vertical.replace("_", " ").title()
+        print(f"\n┌─ {label} {'─' * (68 - len(label))}")
+        for metric_key, metric_label in METRIC_LABELS.items():
+            mc = cfg.get(metric_key)
+            if mc is None:
+                continue
+            parts = []
+            # Range bounds
+            if "healthy_lo" in mc and "healthy_hi" in mc:
+                parts.append(f"healthy {mc['healthy_lo']}–{mc['healthy_hi']}%")
+            if "healthy_lo_days" in mc and "healthy_hi_days" in mc:
+                parts.append(f"healthy {mc['healthy_lo_days']}–{mc['healthy_hi_days']} days")
+            # Absolute ceilings / floors
+            if "alert_floor" in mc and mc["alert_floor"] is not None:
+                parts.append(f"alert floor {mc['alert_floor']}%")
+            if "alert_ceiling" in mc and mc["alert_ceiling"] is not None:
+                parts.append(f"alert ceiling {mc['alert_ceiling']}%")
+            if "alert_ceiling_days" in mc and mc["alert_ceiling_days"] is not None:
+                parts.append(f"alert ceiling {mc['alert_ceiling_days']} days")
+            if "alert_abs_ceiling" in mc:
+                parts.append(f"abs ceiling {mc['alert_abs_ceiling']}%")
+            if "alert_z_ceiling" in mc:
+                parts.append(f"z ceiling {mc['alert_z_ceiling']}%")
+            # z_score_only flag
+            if mc.get("z_score_only") is True:
+                parts.append("z-score only (no absolute threshold)")
+            # Comparison window for M-10
+            if "comparison_window" in mc:
+                parts.append(f"window={mc['comparison_window']}")
+            if "alert_drop_pct" in mc and mc["alert_drop_pct"] is not None:
+                parts.append(f"alert drop {mc['alert_drop_pct']}%")
+            # Float formula
+            if "min_float_threshold" in mc and mc["min_float_threshold"] is not None:
+                parts.append(f"min float ${mc['min_float_threshold']:,}")
+            if "min_float_formula" in mc and mc["min_float_formula"] is not None:
+                parts.append(f"formula={mc['min_float_formula']}")
+            # Notes
+            if "notes" in mc and mc["notes"]:
+                parts.append(f"→ {mc['notes']}")
+            if parts:
+                summary = "  |  ".join(parts)
+                print(f"│  {metric_label:<26} {summary}")
+        print(f"└{'─' * 70}")
+
+    # M-09 vendor tolerance
+    print("\n┌─ M-09 Vendor Price Tolerance (by vendor_type) " + "─" * 22)
+    vt = VERTICAL_CONFIG.get("m09_vendor_tolerance", {})
+    for vtype, vc in vt.items():
+        label = vtype.replace("_", " ")
+        parts = []
+        if "normal_weekly_variation_pct" in vc:
+            parts.append(f"normal var ±{vc['normal_weekly_variation_pct']}%/wk")
+        if "alert_spike_pct" in vc:
+            parts.append(f"alert spike >{vc['alert_spike_pct']}%")
+        if vc.get("expected_variation") == "flat":
+            parts.append("expected: flat")
+        if vc.get("alert_on_any_change") is True:
+            parts.append("alert on any change")
+        if vc.get("alert_on_any_change") is False:
+            parts.append("no alert on seasonal change")
+        if "seasonal_variation_pct" in vc:
+            parts.append(f"seasonal var ±{vc['seasonal_variation_pct']}%")
+        if "alert_type" in vc:
+            parts.append(f"type={vc['alert_type']}")
+        if vc.get("z_score_alert") is False:
+            parts.append("no z-score alert")
+        if "notes" in vc and vc["notes"]:
+            parts.append(f"→ {vc['notes']}")
+        if parts:
+            print(f"│  {label:<26} {'  |  '.join(parts)}")
+    print(f"└{'─' * 70}")
+    print()
+
+
+# ---------------------------------------------------------------------------
 # ADDITIONAL DEMOS  (M-04 · M-09 · M-10 · M-11 · M-14)
 # ---------------------------------------------------------------------------
 def demo_remaining_metrics():
@@ -1801,6 +2187,7 @@ def main():
     test_sarah()
     test_amir()
     test_new_features()
+    _print_vertical_config()
     demo_remaining_metrics()
 
     print("\n" + "█" * 72)
