@@ -1,0 +1,225 @@
+  TEST 1 — MARIA — Maria's Kitchen  (M-01 · M-02 · M-05)
+  M-01 · Projected Cash Gap Date & Amount
+  M-02 · Payroll Coverage Ratio
+  M-05 · Food Cost %  [FIX-M05: s_floor=0.5 pp; z>4 → VERIFY DATA]
+  ⚠️  z=16.27 > 4.0 → VERIFY DATA path  (not crisis alert — likely double-count or mapping error)
+  ✅ PASS  M-01  gap on day 16
+  ✅ PASS  M-01  balance[16]
+  ✅ PASS  M-01  gap_amount  (threshold − balance)
+  ✅ PASS  M-01  cash_threshold  ($3,000 floor wins)
+  ✅ PASS  M-01  balance[15]  (day before payroll)
+  ✅ PASS  M-02  employer_taxes
+  ✅ PASS  M-02  payroll_cash_out
+  ✅ PASS  M-02  coverage_ratio  (< 1.0 → CRITICAL)
+  ✅ PASS  M-05  food_cost_pct
+  ✅ PASS  M-05  12wk mean
+  ✅ PASS  M-05  12wk raw stdev  (orig spec)
+  ✅ PASS  M-05  sigma_eff  (max(0.4522, 0.5) = 0.5)  [FIX-M05]
+  ✅ PASS  M-05  z_food  FIXED (s_floor applied)  [FIX-M05]
+  ℹ️   DEVIATION NOTE: original spec z=18.00; [FIX-M05] z=16.28 (sigma floored at 0.5 pp). z>4 → VERIFY DATA, not crisis alert.
+  TEST 2 — JAMES — Fraser Valley Contracting  (M-07 · M-08 · M-12)
+  M-07 · Receivables DSO  [FIX-M07: use avg AR; ceiling=terms+buffer]
+  ⚠️  [M-07 DSO] |z|=11.18 > 4.0 → VERIFY DATA  (extreme reading — check data quality first)
+  M-08 · Per-Client Delay — Coastal Properties  [FIX-M08: practical floor ≥10d; min 6 invoices]
+  Statistical (z>2.5): True  |  Practical (gap≥10d): True  |  ALERT: YES ⚠️
+  M-12 · Project Float  [FIX-M12: includes fixed costs during float]
+  ✅ PASS  M-07  avg_daily_sales
+  ✅ PASS  M-07  DSO
+  ✅ PASS  M-07  12wk DSO mean
+  ✅ PASS  M-07  12wk DSO stdev  (=0.72 per z-score back-calc)
+  ✅ PASS  M-07  z_DSO
+  ✅ PASS  M-08  client_avg_delay
+  ✅ PASS  M-08  client_stdev
+  ✅ PASS  M-08  client_z
+  ✅ PASS  M-08  practical floor met  (31−3.2=27.8 ≥ 10)  [FIX-M08]
+  ✅ PASS  M-12  min_float_balance  (baseline − upfront)
+  ✅ PASS  M-12  recommended_draw
+  TEST 3 — SARAH — Northvane Studio  (M-06 compound · M-13)
+  M-06 · Labor Cost %  [FIX-M06: s_floor; compound requires 2 wks]
+  M-13 · Runway  [FIX-M13: normalise payroll frequency to monthly]
+  ⚠️  IMMEDIATE ALERT — < 6 months
+  ✅ PASS  M-06  labor_pct
+  ✅ PASS  M-06  12wk labor mean
+  ✅ PASS  M-06  12wk labor stdev
+  ✅ PASS  M-06  z_labor
+  ✅ PASS  M-06  z_revenue
+  ✅ PASS  M-06  compound_signal this week
+  ✅ PASS  M-13  monthly_payroll  (14,200 × 26/12)  [FIX-M13]
+  ✅ PASS  M-13  gross_burn  (corrected)  [FIX-M13]
+  ✅ PASS  M-13  net_burn  (corrected)  [FIX-M13]
+  ✅ PASS  M-13  runway  CORRECTED  [FIX-M13]
+  ℹ️   DEVIATION NOTE [FIX-M13]:
+  TEST 4 — AMIR — Kova AI  (M-03 · M-13 · M-15)
+  M-03 · GST/HST Reserve Gap  [FIX-M03: per-category ITC eligibility]
+  M-13 · Runway  [FIX-M13: normalise payroll frequency to monthly]
+  ⚠️  IMMEDIATE ALERT — < 6 months
+  M-15 · Expansion Readiness Score  [FIX-M15: band, not false decimal]
+  ✅ PASS  M-03  est_gst_gross  ($42,000 × 5%)
+  ✅ PASS  M-03  est_ITCs  (software @ eligibility 1.0)  [FIX-M03]
+  ✅ PASS  M-03  gst_reserve_gap
+  ✅ PASS  M-03  weekly_reserve_needed  ($1,680 / 4.4)
+  ✅ PASS  M-13  monthly_payroll  (10,400 × 26/12)  [FIX-M13]
+  ✅ PASS  M-13  runway  CORRECTED  [FIX-M13]
+  ✅ PASS  M-15  dso_score    (no AR → 100)
+  ✅ PASS  M-15  margin_score ((66-20)/(70-20)×100 = 92)
+  ✅ PASS  M-15  coverage_score (ratio>>1.5 → 100)
+  ✅ PASS  M-15  runway_score  CORRECTED  [FIX-M13]
+  ✅ PASS  M-15  gst_score    (1680 gap / 1680 owing → 0)
+  ✅ PASS  M-15  data_quality (manual = 80)
+  ℹ️   DEVIATION NOTE [FIX-M13]:
+  NEW ASSERTIONS — Change 2 · Alert Budget  &  Change 3 · VERIFY DATA
+  ⚠️  [M-07 test [extreme]] |z|=11.18 > 4.0 → VERIFY DATA  (extreme reading — check data quality first)
+  ⚠️  [M-07 test [alert]] ALERT — z=2.50 > 2.255
+  ✅ PASS  CHANGE 3  z=11.18 routes to VERIFY_DATA
+  ✅ PASS  CHANGE 3  z=2.50  routes to ALERT
+  ✅ PASS  CHANGE 3  z=1.00  routes to OK
+  ALERT BUDGET — Portfolio Ranking Layer  [CHANGE 2]
+  1    M-08 client delay         26.920 ALERT          Coastal 31d overdue — abs_gap 27.8d
+  ✅ PASS  CHANGE 2  cap=4 → returns exactly 4
+  ✅ PASS  CHANGE 2  top signal is highest severity (M-08, z=26.92)
+  ✅ PASS  CHANGE 2  M-10 (z=2.78 < cutoff 2.807) not returned
+  ✅ PASS  CHANGE 2  M-06 (z=1.91 < cutoff 2.807) not returned
+  ✅ PASS  CHANGE 2  M-09 vendor B (z=3.50, above cutoff) trimmed by cap
+  ── Change 1 M-01 Monte Carlo (Maria, 1,000 runs) ──
+  M-01-MC · Probabilistic Cash Gap  [CHANGE 1: 1,000-run Monte Carlo]
+  Monte Carlo: 1,000 runs · seed=42
+  │  P(breach in 90d)   = 100.0%  (1,000 / 1,000 runs)
+  │  Gap day    P10–P90 : Day 16 – Day 16  (median Day 16)
+  │  Gap amount P10–P90 : $2,678.09 – $4,862.31  (median $3,726.69)
+  M-01-MC · Unmodelled-Outflow Scan  [CHANGE 1]
+  ✅ PASS  CHANGE 1  P(breach) ≥ 0.90  (Maria is in cash crisis)
+  ✅ PASS  CHANGE 1  P10_gap_day ≤ deterministic day 16
+  ✅ PASS  CHANGE 1  P90_gap_day ≥ deterministic day 16
+  ✅ PASS  CHANGE 1  P10_gap_amt ≤ deterministic gap $3,736.24
+  ✅ PASS  CHANGE 1  P90_gap_amt ≥ deterministic gap $3,736.24
+  ✅ PASS  CHANGE 1  unmodelled outflows detected (≥ 1 irregular large debit)
+  ── TH-01  M-07  invoice_count=3 (need ≥ 5)
+    M-07 · Receivables DSO  [FIX-M07: use avg AR; ceiling=terms+buffer]
+  ✅ PASS  TH-01  M-07 invoice_count=3 → z_dso is None (z-score suppressed)
+  ✅ PASS  TH-01  M-07 DSO value still returned (3000 / (90000/90) = 3d)
+  ✅ PASS  TH-01  M-07 output contains 'INSUFFICIENT_HISTORY'
+  ── TH-02  M-08  4-invoice history (need ≥ 6)
+    M-08 · Per-Client Delay — Thin Client Co  [FIX-M08: practical floor ≥10d; min 6 invoices]
+  ✅ PASS  TH-02  M-08 4 invoices → alert_fires=False
+  ✅ PASS  TH-02  M-08 4 invoices → client_z is None
+  ✅ PASS  TH-02  M-08 output contains 'INSUFFICIENT_HISTORY'
+  ── TH-03  M-10  4-week history (need ≥ 12)
+    M-10 · Weekly Revenue Trend  [FIX-M10: s_pooled not per-week stdev]
+  ✅ PASS  TH-03  M-10 4 weeks → revenue_z is None (no statistical alert)
+  ✅ PASS  TH-03  M-10 output contains 'INSUFFICIENT_HISTORY'
+  ── TH-04  M-15  months_of_data=2 (need ≥ 3)
+    M-15 · Expansion Readiness Score  [FIX-M15: band, not false decimal]
+  ✅ PASS  TH-04  M-15 months_of_data=2 → band contains 'PARTIAL'
+  ✅ PASS  TH-04  M-15 score still computed (not None — directional use)
+  ✅ PASS  TH-04  M-15 output contains 'PARTIAL'
+  ── DQ-01  M-04  COGS=0 (zero COGS → 100% margin implied)
+    M-04 · Gross Margin %  [FIX-M04: z-score callers use s_floor=1.0 pp]
+  ✅ PASS  DQ-01  M-04 COGS=0 → returns None
+  ✅ PASS  DQ-01  M-04 COGS=0 → output contains DATA_QUALITY_FLAG
+  ✅ PASS  DQ-01  M-04 COGS=0 → no financial alert fires
+  ── DQ-02  M-04  COGS=60,000 on revenue=50,000 (COGS 120% ≥ 100%)
+    M-04 · Gross Margin %  [FIX-M04: z-score callers use s_floor=1.0 pp]
+  ✅ PASS  DQ-02  M-04 COGS≥revenue → returns None
+  ✅ PASS  DQ-02  M-04 COGS≥revenue → output contains DATA_QUALITY_FLAG
+  ✅ PASS  DQ-02  M-04 COGS≥revenue → no financial alert fires
+  ── DQ-03  M-04  revenue=0 (zero revenue denominator)
+    M-04 · Gross Margin %  [FIX-M04: z-score callers use s_floor=1.0 pp]
+  ✅ PASS  DQ-03  M-04 revenue=0 → returns None
+  ✅ PASS  DQ-03  M-04 revenue=0 → output contains DATA_QUALITY_FLAG
+  ✅ PASS  DQ-03  M-04 revenue=0 → no financial alert fires
+  ── DQ-04  M-04  COGS=1,000 on revenue=50,000 (COGS 2% < 5%)
+    M-04 · Gross Margin %  [FIX-M04: z-score callers use s_floor=1.0 pp]
+  ✅ PASS  DQ-04  M-04 COGS<5% → returns None
+  ✅ PASS  DQ-04  M-04 COGS<5% → output contains DATA_QUALITY_FLAG
+  ✅ PASS  DQ-04  M-04 COGS<5% → no financial alert fires
+  ── DQ-05  M-05  food_COGS=0 (zero food cost implied)
+    M-05 · Food Cost %  [FIX-M05: s_floor=0.5 pp; z>4 → VERIFY DATA]
+  ✅ PASS  DQ-05  M-05 food_COGS=0 → food_cost_pct is None
+  ✅ PASS  DQ-05  M-05 food_COGS=0 → output contains DATA_QUALITY_FLAG
+  ✅ PASS  DQ-05  M-05 food_COGS=0 → no financial alert fires
+  ── DQ-06  M-05  food_COGS=60,000 on food_revenue=50,000 (COGS ≥ rev)
+    M-05 · Food Cost %  [FIX-M05: s_floor=0.5 pp; z>4 → VERIFY DATA]
+  ✅ PASS  DQ-06  M-05 COGS≥revenue → food_cost_pct is None
+  ✅ PASS  DQ-06  M-05 COGS≥revenue → output contains DATA_QUALITY_FLAG
+  ✅ PASS  DQ-06  M-05 COGS≥revenue → no financial alert fires
+  ── DQ-07  M-06  revenue=0 (proves 'any metric' zero-revenue guard)
+    M-06 · Labor Cost %  [FIX-M06: s_floor; compound requires 2 wks]
+  ✅ PASS  DQ-07  M-06 revenue=0 → labor_pct is None
+  ✅ PASS  DQ-07  M-06 revenue=0 → output contains DATA_QUALITY_FLAG
+  ✅ PASS  DQ-07  M-06 revenue=0 → no financial alert fires
+  ── VR-01  M-07  DSO = 50d
+    M-07 · Receivables DSO  [FIX-M07: use avg AR; ceiling=terms+buffer]
+    ⚠️  [M-07 DSO] |z|=42.00 > 4.0 → VERIFY DATA  (extreme reading — check data quality first)
+    ⚠️  [M-07 DSO] abs ceiling breach: 50.0d > 14d (VERTICAL_CONFIG['restaurant'])
+    M-07 · Receivables DSO  [FIX-M07: use avg AR; ceiling=terms+buffer]
+  ✅ PASS  VR-01  restaurant  DSO=50d > ceil 14d → abs ceiling FIRES
+  ✅ PASS  VR-01  contractor  DSO=50d < ceil 70d → abs ceiling SILENT
+  ── VR-02  M-06  labor = 42%
+    M-06 · Labor Cost %  [FIX-M06: s_floor; compound requires 2 wks]
+    ⚠️  [M-06] abs ceiling breach: 42.00% > 38% (restaurant threshold)
+    M-06 · Labor Cost %  [FIX-M06: s_floor; compound requires 2 wks]
+  ✅ PASS  VR-02  restaurant  labor=42% > ceil 38% → abs ceiling FIRES
+  ✅ PASS  VR-02  agency      labor=42%: z-score only → abs ceiling SILENT
+  ✅ PASS  VR-02  agency      prints z-score-only notice
+  ── VR-03  M-04  gross margin = 58%
+    M-04 · Gross Margin %  [FIX-M04: z-score callers use s_floor=1.0 pp]
+    M-04 · Gross Margin %  [FIX-M04: z-score callers use s_floor=1.0 pp]
+    ⚠️  [M-04] abs floor breach: 58.00% < 65% (saas threshold)
+  ✅ PASS  VR-03  restaurant  margin=58% > floor 55% → floor SILENT
+  ✅ PASS  VR-03  saas        margin=58% < floor 65% → floor FIRES
+  ── GP1-01  fine_dining  43.5% > ceil 42%  →  expect breach
+  ── GP1-02  fine_dining  35.0% < ceil 42%  →  expect silent
+  ── GP1-03  cafe  31.0% > ceil 30%  →  expect breach
+  ── GP1-04  bar  27.0% < ceil 30%  →  expect silent
+  ── GP1-05  no business_type (backward compat) → no vertical output
+  ✅ PASS  GP1-01  fine_dining 43.5% > ceil 42% → abs ceiling FIRES
+  ✅ PASS  GP1-02  fine_dining 35.0% < ceil 42% → abs ceiling SILENT
+  ✅ PASS  GP1-03  cafe 31.0% > ceil 30% → abs ceiling FIRES
+  ✅ PASS  GP1-04  bar 27.0% < ceil 30% → abs ceiling SILENT
+  ✅ PASS  GP1-05  no business_type → no vertical lookup in output
+  ✅ PASS  GP1-CONFIG  fine_dining alert_abs_ceiling = 42
+  ✅ PASS  GP1-CONFIG  cafe alert_abs_ceiling = 30
+  ✅ PASS  GP1-CONFIG  bar alert_abs_ceiling = 30
+  ── GP2-01  vendor_type=new_vendor  →  notification-only
+    M-09 · Vendor Anomaly — Fresh Foods Inc  [FIX-M09: Bonferroni cutoff for 1 vendor(s)]
+  ── GP2-02  saas  $550 vs mean $500  dev=$50 > $1  →  ALERT
+    M-09 · Vendor Anomaly — Slack  [FIX-M09: Bonferroni cutoff for 1 vendor(s)]
+    ⚠️  [M-09] ALERT — SaaS charge changed by $50.00 (expected flat, tolerance $1.00)
+  ── GP2-03  saas  $500.50 vs mean $500  dev=$0.50 ≤ $1  →  no alert
+    M-09 · Vendor Anomaly — Slack  [FIX-M09: Bonferroni cutoff for 1 vendor(s)]
+  ── GP2-04  produce  $625 vs mean $500  25% spike  →  ALERT
+    M-09 · Vendor Anomaly — Metro Produce  [FIX-M09: Bonferroni cutoff for 1 vendor(s)]
+    ⚠️  [M-09] ALERT — produce spike 25.0% above mean (threshold: >20%)
+  ── GP2-05  produce  $575 vs mean $500  15% spike  →  no alert
+    M-09 · Vendor Anomaly — Metro Produce  [FIX-M09: Bonferroni cutoff for 1 vendor(s)]
+  ── GP2-06  utility  $700 vs mean $500  40% deviation  →  no alert
+    M-09 · Vendor Anomaly — BC Hydro  [FIX-M09: Bonferroni cutoff for 1 vendor(s)]
+  ✅ PASS  GP2-01  new_vendor → z is None (no z-score computed)
+  ✅ PASS  GP2-01  new_vendor → cutoff is 'new_vendor_notification'
+  ✅ PASS  GP2-02  saas dev=$50 > $1 → ALERT fires
+  ✅ PASS  GP2-03  saas dev=$0.50 ≤ $1 → no ALERT fires
+  ✅ PASS  GP2-04  produce 25% spike → ALERT fires
+  ✅ PASS  GP2-05  produce 15% spike → no ALERT fires
+  ✅ PASS  GP2-06  utility 40% deviation → no ALERT fires
+  ── GP3-01  runway_months=None  →  partial score, runway zeroed
+    M-15 · Expansion Readiness Score  [FIX-M15: band, not false decimal]
+  ── GP3-02  runway=None + coverage=None  →  both listed in band
+    M-15 · Expansion Readiness Score  [FIX-M15: band, not false decimal]
+  ── GP3-03  gst_reserve_gap=None  →  gst component zeroed
+    M-15 · Expansion Readiness Score  [FIX-M15: band, not false decimal]
+  ✅ PASS  GP3-01  score returned (not None) when runway=None
+  ✅ PASS  GP3-01  band contains 'components unavailable'
+  ✅ PASS  GP3-01  runway component score down-weighted to 0
+  ✅ PASS  GP3-01  non-None components still score normally (dso=5d → ~91.7)
+  ✅ PASS  GP3-02  both runway + coverage in band notice
+  ✅ PASS  GP3-02  coverage score is 0 when coverage=None
+  ✅ PASS  GP3-03  gst score is 0 when gst inputs are None
+  ADDITIONAL DEMOS — M-04 · M-09 · M-10 · M-11 · M-14
+  M-04 · Gross Margin %  [FIX-M04: z-score callers use s_floor=1.0 pp]
+  M-09 · Vendor Anomaly — Western Lumber Supply  [FIX-M09: Bonferroni cutoff for 12 vendor(s)]
+  ⚠️  [M-09 vendor] |z|=10.85 > 4.0 → VERIFY DATA  (extreme reading — check data quality first)
+  M-10 · Weekly Revenue Trend  [FIX-M10: s_pooled not per-week stdev]
+  ⚠️  [M-10 revenue] ALERT — z=-2.78 < −2.255
+  M-11 · Hire Affordability  [FIX-M11: onboarding cost amortised]
+  M-14 · Break-Even  [FIX-M14: separate variable hourly labour]
+  ✅  ALL ASSERTIONS PASSED

@@ -1,0 +1,15 @@
+# Claude Code config
+.claude/
+
+# Python cache
+.pytest_cache/
+__pycache__/
+*.pyc
+
+# Strategic docs - keep local for now
+Pulse_*.docx
+01_RAW_API_RESPONSES.md
+02_NORMALIZED_DB_ROWS.md
+
+# OS files
+.DS_Store
