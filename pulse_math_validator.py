@@ -1032,6 +1032,12 @@ def m01_cash_gap_mc(current_balance, daily_inflows_base, daily_outflows_base,
 def m02_payroll_coverage(gross_pay, net_pay, cpp_rate, ei_rate,
                           balance_before_payroll):
     """Returns (payroll_cash_out, coverage_ratio)."""
+    # ── GAP-6: zero payroll guard ──────────────────────────────────────────
+    # Coverage is undefined when there's no payroll to cover (skipped pay
+    # period, zero-employee period).
+    if net_pay == 0:
+        return None, None
+
     _hdr("M-02 · Payroll Coverage Ratio")
 
     employer_cpp    = gross_pay * cpp_rate
@@ -1695,6 +1701,12 @@ def m13_runway(payroll_net_per_run, payroll_period,
     [FIX-M13] monthly_payroll = per_run × frequency_factor.
     Returns (monthly_payroll, gross_burn, net_burn, runway, raise_window).
     """
+    # ── GAP-5: negative balance guard ─────────────────────────────────────
+    # Runway is undefined when already overdrawn; M-01 cash gap is the
+    # correct alert for this state.
+    if current_balance < 0:
+        return None, None, None, None, None
+
     _hdr("M-13 · Runway  [FIX-M13: normalise payroll frequency to monthly]")
 
     monthly_payroll, factor = normalise_to_monthly(payroll_net_per_run,

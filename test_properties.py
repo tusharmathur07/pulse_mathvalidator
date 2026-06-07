@@ -124,3 +124,99 @@ def test_m01_handles_none_in_inflows(
     # validator. Either with real numbers OR with None values guarded.
     assert result is not None, "M-01 returned None instead of a tuple"
     assert len(result) == 5, f"M-01 expected 5-tuple, got {len(result)}-tuple"
+
+
+# ---------------------------------------------------------------------------
+# PROPERTY 3 — Output Bounds
+# ---------------------------------------------------------------------------
+# Three sub-properties, one per metric:
+#   3a. m13_runway     : runway months (result[3]) >= 0
+#   3b. m04_gross_margin: gross_margin_pct <= 100 when not None
+#   3c. m02_payroll_coverage: coverage_ratio (result[1]) >= 0
+# ---------------------------------------------------------------------------
+
+from pulse_math_validator import m13_runway, m04_gross_margin, m02_payroll_coverage
+
+
+# 3a ── m13_runway ─────────────────────────────────────────────────────────
+
+@given(
+    payroll_net_per_run  = st.floats(min_value=0, max_value=100_000,
+                                     allow_nan=False, allow_infinity=False),
+    payroll_period       = st.sampled_from(["weekly", "biweekly",
+                                            "semimonthly", "monthly"]),
+    non_payroll_monthly  = st.floats(min_value=0, max_value=100_000,
+                                     allow_nan=False, allow_infinity=False),
+    revenue_monthly      = st.floats(min_value=0, max_value=100_000,
+                                     allow_nan=False, allow_infinity=False),
+    current_balance      = st.floats(min_value=-10_000, max_value=1_000_000,
+                                     allow_nan=False, allow_infinity=False),
+)
+@settings(max_examples=500)
+def test_m13_runway_is_non_negative(
+    payroll_net_per_run, payroll_period, non_payroll_monthly,
+    revenue_monthly, current_balance,
+):
+    """M-13 runway months must be >= 0 for any non-negative balance."""
+    result = m13_runway(
+        payroll_net_per_run, payroll_period,
+        non_payroll_monthly, revenue_monthly, current_balance,
+    )
+
+    assert result is not None, "M-13 returned None unexpectedly"
+    assert len(result) == 5, f"M-13 expected 5-tuple, got {len(result)}"
+    _, _, _, runway, _ = result
+    if runway is None:
+        return  # GAP-5 guard fired (negative balance) — acceptable
+    assert runway >= 0, f"M-13 runway is negative: {runway}"
+
+
+# 3b ── m04_gross_margin ───────────────────────────────────────────────────
+
+@given(
+    revenue       = st.floats(min_value=0, max_value=1_000_000,
+                              allow_nan=False, allow_infinity=False),
+    cogs          = st.floats(min_value=0, max_value=1_000_000,
+                              allow_nan=False, allow_infinity=False),
+    business_type = st.sampled_from(["", "restaurant", "cafe",
+                                     "bar", "fine_dining"]),
+)
+@settings(max_examples=500)
+def test_m04_gross_margin_at_most_100(revenue, cogs, business_type):
+    """M-04 gross margin % must be <= 100 whenever it returns a real value."""
+    result = m04_gross_margin(revenue, cogs, business_type)
+
+    if result is None:
+        return  # guard fired — acceptable
+    assert result <= 100, f"M-04 gross margin exceeded 100%: {result}"
+
+
+# 3c ── m02_payroll_coverage ───────────────────────────────────────────────
+
+@given(
+    gross_pay             = st.floats(min_value=0, max_value=100_000,
+                                      allow_nan=False, allow_infinity=False),
+    net_pay               = st.floats(min_value=0, max_value=100_000,
+                                      allow_nan=False, allow_infinity=False),
+    cpp_rate              = st.floats(min_value=0, max_value=0.20,
+                                      allow_nan=False, allow_infinity=False),
+    ei_rate               = st.floats(min_value=0, max_value=0.10,
+                                      allow_nan=False, allow_infinity=False),
+    balance_before_payroll = st.floats(min_value=0, max_value=1_000_000,
+                                       allow_nan=False, allow_infinity=False),
+)
+@settings(max_examples=500)
+def test_m02_coverage_ratio_is_non_negative(
+    gross_pay, net_pay, cpp_rate, ei_rate, balance_before_payroll,
+):
+    """M-02 coverage ratio must be >= 0 for any non-negative balance."""
+    result = m02_payroll_coverage(
+        gross_pay, net_pay, cpp_rate, ei_rate, balance_before_payroll,
+    )
+
+    assert result is not None, "M-02 returned None unexpectedly"
+    assert len(result) == 2, f"M-02 expected 2-tuple, got {len(result)}"
+    _, coverage = result
+    if coverage is None:
+        return  # GAP-6 guard fired (zero payroll) — acceptable
+    assert coverage >= 0, f"M-02 coverage ratio is negative: {coverage}"
