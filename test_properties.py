@@ -220,3 +220,48 @@ def test_m02_coverage_ratio_is_non_negative(
     if coverage is None:
         return  # GAP-6 guard fired (zero payroll) — acceptable
     assert coverage >= 0, f"M-02 coverage ratio is negative: {coverage}"
+
+
+# ---------------------------------------------------------------------------
+# PROPERTY 4 — Determinism of m01_cash_gap_mc
+# ---------------------------------------------------------------------------
+# Rule: m01_cash_gap_mc wraps 1,000 Monte Carlo simulations using
+# random.Random(seed). The architectural promise of Pulse is deterministic
+# math: identical inputs + identical seed must produce bit-exact identical
+# output every time. Approximate equality is NOT acceptable — true
+# determinism is bit-exact.
+# ---------------------------------------------------------------------------
+
+from pulse_math_validator import m01_cash_gap_mc
+
+
+@given(
+    current_balance  = st.floats(min_value=1_000, max_value=100_000,
+                                  allow_nan=False, allow_infinity=False),
+    daily_rev        = st.floats(min_value=100,   max_value=5_000,
+                                  allow_nan=False, allow_infinity=False),
+    daily_cost       = st.floats(min_value=100,   max_value=5_000,
+                                  allow_nan=False, allow_infinity=False),
+    avg_weekly_fixed = st.floats(min_value=500,   max_value=20_000,
+                                  allow_nan=False, allow_infinity=False),
+)
+@settings(max_examples=200)
+def test_m01_mc_is_deterministic(
+    current_balance, daily_rev, daily_cost, avg_weekly_fixed,
+):
+    """m01_cash_gap_mc must return bit-exact identical output for identical inputs and seed."""
+    inflows  = [daily_rev]  * 90
+    outflows = [daily_cost] * 90
+
+    result1 = m01_cash_gap_mc(
+        current_balance, inflows, outflows, avg_weekly_fixed, seed=42,
+    )
+    result2 = m01_cash_gap_mc(
+        current_balance, inflows, outflows, avg_weekly_fixed, seed=42,
+    )
+
+    assert result1 == result2, (
+        f"m01_cash_gap_mc is non-deterministic.\n"
+        f"  First call:  {result1}\n"
+        f"  Second call: {result2}"
+    )
