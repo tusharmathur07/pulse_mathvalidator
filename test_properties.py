@@ -1,3 +1,38 @@
+# ============ MUTATION TESTING BACKLOG (deferred) ============
+#
+# Mutation run: 1777 mutants, 425 killed by assertions; survivors triaged —
+# ~890 equivalent (print/format/config), ~50 default-param false survivors,
+# ~230 true gaps above.
+#
+# Priority order for future property tests:
+#
+# 1. M-03 gst_reserve_gap: ZERO test coverage. 14 computation survivors
+#    (reserve_gap sign inversion, weekly_needed * vs /). Highest priority —
+#    this is the Canadian GST moat metric.
+#
+# 2. rank_and_cap_alerts: filter logic untested. 30 survivors including a
+#    VERIFY_DATA filter inversion (== → !=) that would suppress real alerts.
+#
+# 3. M-10 revenue_trend: seasonal formula untested. 12 survivors (seasonal
+#    expected mu*idx → mu/idx, z-score numerator - → +).
+#
+# 4. M-14 break_even: formula direction untested. 11 survivors
+#    (fixed_costs / (1 - ratio) → fixed_costs * (1 - ratio)).
+#
+# 5. M-08 client_delay: abs_gap sign untested. 9 survivors
+#    (days_overdue - client_avg → days_overdue + client_avg).
+#
+# 6. M-15 score bounds: only None-propagation tested, not weight-sum
+#    invariant or score-in-[0,100] when inputs present. 19 survivors.
+#
+# 7. Category C boundary cases: ~80 survivors. Hypothesis strategies use
+#    continuous floats, never hit exact 0/1/5/equality boundaries. Needs
+#    boundary-targeted property tests for guards in M-13 (balance=0),
+#    M-02 (net_pay=0), M-04 (cogs_pct=1.0), M-05 (food_cogs=food_revenue),
+#    M-07 (invoice_count=5), M-08 (n=min_invoices), M-01 (bal=threshold).
+#
+# ============ END BACKLOG ============
+
 """
 Property-based tests for pulse_math_validator.py.
 
