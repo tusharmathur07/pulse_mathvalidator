@@ -9,7 +9,7 @@ Run with: python3 -m pytest test_properties.py -q
 """
 
 from hypothesis import given, strategies as st, settings
-from pulse_math_validator import m15_expansion_score
+from pulse_metrics import m15_expansion_score
 
 
 # ---------------------------------------------------------------------------
@@ -80,7 +80,7 @@ def test_m15_handles_any_none_input(
 # or return the established None-tagged tuple.
 # ---------------------------------------------------------------------------
 
-from pulse_math_validator import m01_cash_gap
+from pulse_metrics import m01_cash_gap
 
 @given(
     current_balance = st.floats(min_value=0, max_value=100000,
@@ -135,7 +135,7 @@ def test_m01_handles_none_in_inflows(
 #   3c. m02_payroll_coverage: coverage_ratio (result[1]) >= 0
 # ---------------------------------------------------------------------------
 
-from pulse_math_validator import m13_runway, m04_gross_margin, m02_payroll_coverage
+from pulse_metrics import m13_runway, m04_gross_margin, m02_payroll_coverage
 
 
 # 3a ── m13_runway ─────────────────────────────────────────────────────────
@@ -232,7 +232,7 @@ def test_m02_coverage_ratio_is_non_negative(
 # determinism is bit-exact.
 # ---------------------------------------------------------------------------
 
-from pulse_math_validator import m01_cash_gap_mc
+from pulse_metrics import m01_cash_gap_mc
 
 
 @given(
@@ -264,4 +264,136 @@ def test_m01_mc_is_deterministic(
         f"m01_cash_gap_mc is non-deterministic.\n"
         f"  First call:  {result1}\n"
         f"  Second call: {result2}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# PROPERTY 5 — Metamorphic relations (financial logic correctness)
+# ---------------------------------------------------------------------------
+# These test that the DIRECTION and STRUCTURE of outputs matches financial
+# logic, without needing to know exact expected values.
+#
+#   5a. M-04 scaling invariance  : margin(R,C) == margin(2R,2C)
+#   5b. M-04 cogs monotonicity   : higher COGS → lower (or equal) margin
+#   5c. M-13 balance monotonicity: higher balance → longer (or equal) runway
+#   5d. M-02 payroll monotonicity: higher net_pay → lower (or equal) coverage
+# ---------------------------------------------------------------------------
+
+import math
+
+
+# 5a ── M-04 scaling invariance ─────────────────────────────────────────────
+
+@given(
+    revenue = st.floats(min_value=1, max_value=500_000,
+                        allow_nan=False, allow_infinity=False),
+    cogs    = st.floats(min_value=0, max_value=500_000,
+                        allow_nan=False, allow_infinity=False),
+)
+@settings(max_examples=300)
+def test_m04_scaling_invariance(revenue, cogs):
+    """Gross margin is scale-free: margin(R,C) == margin(2R,2C)."""
+    r1 = m04_gross_margin(revenue,     cogs)
+    r2 = m04_gross_margin(revenue * 2, cogs * 2)
+    if r1 is None or r2 is None:
+        return  # guard fired on one or both — acceptable
+    assert math.isclose(r1, r2, rel_tol=1e-9), (
+        f"M-04 scaling invariance broken: "
+        f"margin({revenue},{cogs})={r1}  !=  "
+        f"margin({revenue*2},{cogs*2})={r2}"
+    )
+
+
+# 5b ── M-04 cogs monotonicity ──────────────────────────────────────────────
+
+@given(
+    revenue  = st.floats(min_value=1, max_value=500_000,
+                         allow_nan=False, allow_infinity=False),
+    cogs_lo  = st.floats(min_value=0, max_value=500_000,
+                         allow_nan=False, allow_infinity=False),
+    delta    = st.floats(min_value=0, max_value=500_000,
+                         allow_nan=False, allow_infinity=False),
+)
+@settings(max_examples=300)
+def test_m04_higher_cogs_lower_margin(revenue, cogs_lo, delta):
+    """For fixed revenue, increasing COGS must decrease (or hold) gross margin."""
+    cogs_hi = cogs_lo + delta
+    r_lo = m04_gross_margin(revenue, cogs_lo)
+    r_hi = m04_gross_margin(revenue, cogs_hi)
+    if r_lo is None or r_hi is None:
+        return  # guard fired — acceptable
+    assert r_hi <= r_lo, (
+        f"M-04 monotonicity broken: margin with cogs={cogs_hi} ({r_hi}%) "
+        f"> margin with cogs={cogs_lo} ({r_lo}%) at revenue={revenue}"
+    )
+
+
+# 5c ── M-13 balance monotonicity ───────────────────────────────────────────
+
+@given(
+    payroll_net_per_run = st.floats(min_value=0, max_value=50_000,
+                                    allow_nan=False, allow_infinity=False),
+    payroll_period      = st.sampled_from(["weekly", "biweekly",
+                                           "semimonthly", "monthly"]),
+    non_payroll_monthly = st.floats(min_value=0, max_value=50_000,
+                                    allow_nan=False, allow_infinity=False),
+    revenue_monthly     = st.floats(min_value=0, max_value=50_000,
+                                    allow_nan=False, allow_infinity=False),
+    balance_lo          = st.floats(min_value=0, max_value=500_000,
+                                    allow_nan=False, allow_infinity=False),
+    delta               = st.floats(min_value=0, max_value=100_000,
+                                    allow_nan=False, allow_infinity=False),
+)
+@settings(max_examples=300)
+def test_m13_higher_balance_longer_runway(
+    payroll_net_per_run, payroll_period, non_payroll_monthly,
+    revenue_monthly, balance_lo, delta,
+):
+    """For all other inputs fixed, higher balance must give longer (or equal) runway."""
+    balance_hi = balance_lo + delta
+    r_lo = m13_runway(payroll_net_per_run, payroll_period,
+                      non_payroll_monthly, revenue_monthly, balance_lo)
+    r_hi = m13_runway(payroll_net_per_run, payroll_period,
+                      non_payroll_monthly, revenue_monthly, balance_hi)
+    _, _, _, runway_lo, _ = r_lo
+    _, _, _, runway_hi, _ = r_hi
+    if runway_lo is None or runway_hi is None:
+        return  # GAP-5 guard fired — acceptable
+    assert runway_hi >= runway_lo, (
+        f"M-13 monotonicity broken: runway with balance={balance_hi} ({runway_hi} mo) "
+        f"< runway with balance={balance_lo} ({runway_lo} mo)"
+    )
+
+
+# 5d ── M-02 payroll monotonicity ───────────────────────────────────────────
+
+@given(
+    gross_pay              = st.floats(min_value=0,    max_value=50_000,
+                                       allow_nan=False, allow_infinity=False),
+    net_pay_lo             = st.floats(min_value=0.01, max_value=50_000,
+                                       allow_nan=False, allow_infinity=False),
+    delta                  = st.floats(min_value=0,    max_value=50_000,
+                                       allow_nan=False, allow_infinity=False),
+    cpp_rate               = st.floats(min_value=0,    max_value=0.20,
+                                       allow_nan=False, allow_infinity=False),
+    ei_rate                = st.floats(min_value=0,    max_value=0.10,
+                                       allow_nan=False, allow_infinity=False),
+    balance_before_payroll = st.floats(min_value=0,    max_value=500_000,
+                                       allow_nan=False, allow_infinity=False),
+)
+@settings(max_examples=300)
+def test_m02_higher_payroll_lower_coverage(
+    gross_pay, net_pay_lo, delta, cpp_rate, ei_rate, balance_before_payroll,
+):
+    """For fixed balance, increasing net_pay must decrease (or hold) coverage ratio."""
+    net_pay_hi = net_pay_lo + delta
+    _, coverage_lo = m02_payroll_coverage(
+        gross_pay, net_pay_lo, cpp_rate, ei_rate, balance_before_payroll)
+    _, coverage_hi = m02_payroll_coverage(
+        gross_pay, net_pay_hi, cpp_rate, ei_rate, balance_before_payroll)
+    if coverage_lo is None or coverage_hi is None:
+        return  # GAP-6 guard fired — acceptable
+    assert coverage_hi <= coverage_lo, (
+        f"M-02 monotonicity broken: coverage with net_pay={net_pay_hi} ({coverage_hi}) "
+        f"> coverage with net_pay={net_pay_lo} ({coverage_lo})"
     )
