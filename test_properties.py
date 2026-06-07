@@ -68,3 +68,59 @@ def test_m15_handles_any_none_input(
 
     # Band must be a non-empty string
     assert isinstance(band, str) and len(band) > 0, f"M-15 band invalid: {band!r}"
+
+
+# ---------------------------------------------------------------------------
+# PROPERTY 2 — Dirty-data propagation through M-10 → M-01
+# ---------------------------------------------------------------------------
+# Rule: If M-10 returns thin-history (None, None, None, None), the downstream
+# consumer (M-01) sees that as a None somewhere in its daily_inflows list.
+# M-01 must guard against that — never crash on None, never multiply None
+# by a number. Either return a clean result (None treated as zero or skip)
+# or return the established None-tagged tuple.
+# ---------------------------------------------------------------------------
+
+from pulse_math_validator import m01_cash_gap
+
+@given(
+    current_balance = st.floats(min_value=0, max_value=100000,
+                                allow_nan=False, allow_infinity=False),
+    # daily_inflows: list of either a positive float OR None (simulates
+    # what happens when an upstream guard left a hole in the data)
+    daily_inflows = st.lists(
+        st.one_of(
+            st.none(),
+            st.floats(min_value=0, max_value=10000,
+                      allow_nan=False, allow_infinity=False)
+        ),
+        min_size=1, max_size=90
+    ),
+    daily_outflows = st.lists(
+        st.floats(min_value=0, max_value=10000,
+                  allow_nan=False, allow_infinity=False),
+        min_size=1, max_size=90
+    ),
+    threshold = st.floats(min_value=0, max_value=10000,
+                          allow_nan=False, allow_infinity=False),
+    days = st.integers(min_value=1, max_value=90),
+)
+@settings(max_examples=500)
+def test_m01_handles_none_in_inflows(
+    current_balance, daily_inflows, daily_outflows, threshold, days
+):
+    """M-01 must not crash when daily_inflows contains None (dirty upstream)."""
+    try:
+        result = m01_cash_gap(
+            current_balance, daily_inflows, daily_outflows, threshold, days
+        )
+    except (TypeError, ValueError) as e:
+        # If M-01 crashes on None, that's a real bug — Hypothesis just found it.
+        raise AssertionError(
+            f"M-01 crashed on None in daily_inflows: {type(e).__name__}: {e}"
+        )
+
+    # If M-01 returned, the result must be the expected 5-tuple shape
+    # (gap_day, gap_balance, gap_amount, cash_threshold, balances) per the
+    # validator. Either with real numbers OR with None values guarded.
+    assert result is not None, "M-01 returned None instead of a tuple"
+    assert len(result) == 5, f"M-01 expected 5-tuple, got {len(result)}-tuple"

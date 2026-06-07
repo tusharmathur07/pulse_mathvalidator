@@ -749,6 +749,13 @@ def m01_cash_gap(current_balance, daily_inflows, daily_outflows,
     Returns (gap_day, gap_balance, gap_amount, threshold, balances_list).
     gap_day is 1-indexed.
     """
+    # ── GAP-4: dirty-data guard — None element or undersized input lists ────
+    if (any(v is None for v in daily_inflows) or
+            any(v is None for v in daily_outflows) or
+            len(daily_inflows) < days or
+            len(daily_outflows) < days):
+        return None, None, None, None, None
+
     _hdr("M-01 · Projected Cash Gap Date & Amount")
 
     cash_threshold = max(threshold_floor, 0.50 * avg_weekly_fixed)
