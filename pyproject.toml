@@ -1,0 +1,6 @@
+[tool.mutmut]
+paths_to_mutate = "pulse_metrics.py"
+tests_dir = "."
+# Run the fast validator first (0.1 s kill); only invoke pytest if it passes.
+# MUTANT_UNDER_TEST triggers the conftest.py profile: max_examples=30 (~1 s).
+runner = "bash run_mutation_tests.sh"
